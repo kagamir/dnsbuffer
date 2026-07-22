@@ -51,6 +51,8 @@ DoH / DoT / 明文 UDP 三种上游实现共用它，于是「上游组」「boo
 - `hickory-proto` — DNS 报文编解码（仅用 wire 编解码与 `Message`/`Record` 类型，不用其高层 resolver/client）
 - `rustls`（启用 ECH 特性）+ `hyper` + `h3` / `quinn` — 自建上游连接层，获得 HTTP/3 与 ECH
 - `hashlink`（`LinkedHashMap`）— 纯内存乐观缓存（保持插入顺序，O(1) 增删查/淘汰）
+- `arc_swap` — 广告屏蔽规则集的无锁热替换
+- `humantime`（或等价）— 解析 `update_interval` 等时长配置
 - `serde` + `toml` — 配置
 - `tracing` — 结构化日志
 - `async-trait` — trait 中的 async 方法
@@ -73,7 +75,7 @@ src/
   bootstrap.rs    解析上游域名 IP（IP/DoH/DoT）+ 查 HTTPS 记录取 ECHConfig
   cache.rs        纯内存链式哈希表乐观缓存（FIFO 限条数）
   hosts.rs        自定义 hosts 精确 / 通配匹配
-  filter.rs       广告屏蔽（adblock 语法 + hosts 语法）+ 豁免列表
+  filter.rs       广告屏蔽（adblock/hosts 语法，本地+远程 URL 定时更新）+ 豁免列表
   ecs.rs          EDNS 客户端子网注入
   stats.rs        上游滑动窗口统计（失败数 / 平均延迟）
 ```
@@ -135,6 +137,21 @@ struct CacheEntry {
 
 默认剥离客户端真实来源；按配置的固定子网，或启动时自动探测出口 IP 得到的 `/24`（IPv4）、`/56`（IPv6），写入 OPT 记录的 ECS option。可配置完全禁用。
 
+### 7.5 规则源加载与定时更新（filter.rs）
+
+广告屏蔽规则源（`adblock.rule_source`）支持两种形态，可混用：
+
+- **本地路径（`path`）**：启动时读取，随进程存活。
+- **远程 URL（`url`）**：启动时异步拉取一次；若设了 `update_interval`（如 `"24h"`），后台定时任务按周期重新拉取。
+
+要点：
+
+- **拉取通道**：复用上游连接层的 `hyper` HTTPS 客户端下载规则文件。URL 域名的解析走 **bootstrap 解析器**（避免依赖尚未就绪的主管线，也防止「解析规则源要先加载规则」的环）。
+- **热替换**：filter 内部编译后的规则集用 `arc_swap::ArcSwap<RuleSet>` 持有，后台拉取解析完成后原子替换指针；查询读路径无锁、零停顿。
+- **失败降级**：远程拉取或解析失败时**保留上一次成功的规则集**并记 `warn`；首次拉取即失败则该源暂为空，等下个周期重试。
+- **不落盘**：远程规则仅驻留内存，与缓存策略一致，不做磁盘持久化。
+- **解析统一**：无论来源，加载后统一解析为 adblock 语法与 hosts 语法两类规则，合并进同一匹配结构（域名后缀匹配 + adblock 规则匹配），豁免列表（`allowlist`）优先短路。
+
 ## 8. Bootstrap（bootstrap.rs）
 
 用于解析上游 DoH 域名的 IP，以及查询 HTTPS 记录获取 ECHConfig。支持三种形态：
@@ -170,9 +187,16 @@ mode = "auto"          # auto | fixed | disabled
 fixed_subnet = ""      # mode=fixed 时使用，如 "1.2.3.0/24"
 
 [adblock]
-rule_files = ["/path/to/adblock.txt", "/path/to/hosts.txt"]
 allowlist = ["example.com"]
-block_response = "zero" # zero(0.0.0.0/::)
+block_response = "zero"          # zero(0.0.0.0/::)
+
+# 规则源：可以是本地路径或远程 URL，二选一填写
+[[adblock.rule_source]]
+path = "/path/to/adblock.txt"    # 本地文件，随进程启动加载
+
+[[adblock.rule_source]]
+url = "https://example.com/easylist.txt"   # 远程规则
+update_interval = "24h"          # 更新周期；省略则仅启动时拉取一次
 
 [[hosts]]
 name = "router.local"
