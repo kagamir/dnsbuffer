@@ -15,7 +15,7 @@
 4. Bootstrap DNS 支持 IP、DoH、DoT；非 IP 时需注明域名及其对应 IP。
 5. 支持自定义 hosts 直接返回解析结果。
 6. 广告屏蔽支持 adblock 语法或 Hosts 语法的文件地址，也支持自定义豁免地址。
-7. 乐观缓存：用 SQLite 缓存解析过的地址，配置限制条数，FIFO 规则；命中直接返回，随后调用上游更新并重新入队，删除旧缓存。
+7. 乐观缓存：缓存解析过的地址，配置限制条数，FIFO 规则；命中直接返回，随后调用上游更新并重新入队，删除旧缓存。（原始需求提及 SQLite，经讨论为响应速度改用纯内存链式哈希表实现相同语义，见第 3、7.2 节。）
 8. 支持 EDNS 客户端子网（ECS）。
 9. 后备 DNS（支持 IP、DoH、DoT）：当上游全部失效或不响应时提供查询服务。
 
@@ -30,7 +30,7 @@
 | 平台/形态 | 跨平台前台进程，不内置守护进程化 |
 | ECS 策略 | 自动注入（可配置固定子网或自动探测出口子网），默认剥离客户端真实来源 |
 | 广告屏蔽命中响应 | 返回空地址 `0.0.0.0` / `::` |
-| 缓存存储 | **内存 SQLite（`:memory:`）**，不落盘，退出即丢失，换取更快读写 |
+| 缓存存储 | **纯内存链式哈希表**（`hashlink::LinkedHashMap` / 等价 HashMap+侵入双向链表），不落盘，退出即丢失；O(1) 增删查，避免 SQL 与序列化开销 |
 
 ## 4. 总体架构与技术栈
 
@@ -50,7 +50,7 @@ DoH / DoT / 明文 UDP 三种上游实现共用它，于是「上游组」「boo
 - `tokio` — 运行时、UDP/TCP 监听
 - `hickory-proto` — DNS 报文编解码（仅用 wire 编解码与 `Message`/`Record` 类型，不用其高层 resolver/client）
 - `rustls`（启用 ECH 特性）+ `hyper` + `h3` / `quinn` — 自建上游连接层，获得 HTTP/3 与 ECH
-- `rusqlite`（bundled）— 内存乐观缓存
+- `hashlink`（`LinkedHashMap`）— 纯内存乐观缓存（保持插入顺序，O(1) 增删查/淘汰）
 - `serde` + `toml` — 配置
 - `tracing` — 结构化日志
 - `async-trait` — trait 中的 async 方法
@@ -71,7 +71,7 @@ src/
     plain.rs      明文 UDP/IP 解析器（bootstrap / fallback 用）
     selector.rs   加权随机算法
   bootstrap.rs    解析上游域名 IP（IP/DoH/DoT）+ 查 HTTPS 记录取 ECHConfig
-  cache.rs        内存 SQLite 乐观缓存（FIFO 限条数）
+  cache.rs        纯内存链式哈希表乐观缓存（FIFO 限条数）
   hosts.rs        自定义 hosts 精确 / 通配匹配
   filter.rs       广告屏蔽（adblock 语法 + hosts 语法）+ 豁免列表
   ecs.rs          EDNS 客户端子网注入
@@ -107,21 +107,23 @@ w = 1 / ((t_avg_ms + ε) × (1 + k·f))
 
 ### 7.2 乐观缓存（cache.rs）
 
-内存 SQLite，表结构约为：
+纯内存链式哈希表（`hashlink::LinkedHashMap`，或语义等价的 HashMap + 侵入双向链表），保持插入顺序。条目结构约为：
 
-```sql
-CREATE TABLE cache (
-  key         TEXT PRIMARY KEY,   -- qname + qtype
-  message     BLOB NOT NULL,      -- 编码后的应答报文
-  inserted_at INTEGER NOT NULL,   -- 单调序号或时间戳，用于 FIFO
-  expires_at  INTEGER NOT NULL    -- TTL 到期时间
-);
+```rust
+struct CacheKey {   // 作为 map 的 key
+    name: Name,     // qname
+    qtype: RecordType,
+}
+struct CacheEntry {
+    message: Message,   // 缓存的应答报文（无需序列化）
+    expires_at: Instant, // TTL 到期时间
+}
 ```
 
-- **命中即返回**（不管 TTL 是否过期），保证低延迟。
-- **过期命中**额外触发后台刷新：上游拿到新结果后 `DELETE` 旧行 + `INSERT` 新行到队尾。
-- **FIFO 限条数**：插入后若总数超过配置上限，按 `inserted_at` 升序删除最旧行。
-- **并发访问**：`:memory:` 数据库无法通过多个独立连接共享，必须用单一共享连接 `Arc<Mutex<Connection>>`（或专用串行化 task）访问。SQLite 操作是轻量同步调用，用 `Mutex` 即可，不需异步 SQLite 驱动。
+- **命中即返回**（不管 TTL 是否过期），保证低延迟；读取用 `get`，**不改动队列顺序**（保持 FIFO 而非 LRU）。
+- **过期命中**额外触发后台刷新：上游拿到新结果后 `remove(key)` 再 `insert` 到队尾（O(1)）。
+- **FIFO 限条数**：插入后若总数超过配置上限，`pop_front` 淘汰最旧条目（O(1)）。
+- **并发访问**：用 `Mutex<LinkedHashMap>` 包裹即可——每次操作是纳秒级 map 操作、锁持有极短。若日后需要极致吞吐，可按 key 哈希分成 N 个桶各自加锁。无 SQL、无序列化开销、无 C 依赖。
 
 ### 7.3 ECH（doh.rs）
 
