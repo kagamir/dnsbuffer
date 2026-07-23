@@ -1,6 +1,7 @@
 [server]
 listen = "0.0.0.0:53"
 query_timeout_ms = 10000
+upstream_timeout_ms = 5000       # 主上游阶段预算：失败或超时即切 fallback
 
 [cache]
 max_entries = 10000

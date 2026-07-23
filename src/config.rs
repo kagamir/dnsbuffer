@@ -32,12 +32,19 @@ fn default_query_timeout_ms() -> u64 {
     10_000
 }
 
+fn default_upstream_timeout_ms() -> u64 {
+    5_000
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
-    /// 单查询总超时（毫秒），包裹「上游+后备」整链。
+    /// 单查询总超时（毫秒），包裹「上游+后备」整链，最终安全网。
     #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
+    /// 主上游阶段预算（毫秒）：失败或超过此时限即切换 fallback 兜底。
+    #[serde(default = "default_upstream_timeout_ms")]
+    pub upstream_timeout_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -282,5 +289,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
+        assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
     }
 }

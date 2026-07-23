@@ -113,21 +113,34 @@ async fn try_member(m: &Member, query: &Message) -> Result<Message> {
 pub struct FallbackResolver {
     primary: Arc<dyn Resolver>,
     fallback: Arc<dyn Resolver>,
+    /// 主上游阶段预算：失败或超时即切换 fallback。
+    primary_timeout: std::time::Duration,
 }
 
 impl FallbackResolver {
-    pub fn new(primary: Arc<dyn Resolver>, fallback: Arc<dyn Resolver>) -> Self {
-        Self { primary, fallback }
+    pub fn new(
+        primary: Arc<dyn Resolver>,
+        fallback: Arc<dyn Resolver>,
+        primary_timeout: std::time::Duration,
+    ) -> Self {
+        Self { primary, fallback, primary_timeout }
     }
 }
 
 #[async_trait]
 impl Resolver for FallbackResolver {
     async fn resolve(&self, query: &Message) -> Result<Message> {
-        match self.primary.resolve(query).await {
-            Ok(resp) => Ok(resp),
-            Err(e) => {
+        match tokio::time::timeout(self.primary_timeout, self.primary.resolve(query)).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(e)) => {
                 tracing::warn!("primary upstreams exhausted, using fallback: {e:#}");
+                self.fallback.resolve(query).await
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "primary upstreams exceeded {:?} budget, using fallback",
+                    self.primary_timeout
+                );
                 self.fallback.resolve(query).await
             }
         }
@@ -229,8 +242,39 @@ mod tests {
         let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
         let primary = Arc::new(UpstreamGroup::new(vec![("bad".into(), bad as Arc<dyn Resolver>)], 8, 5.0));
         let fallback = Arc::new(UpstreamGroup::new(vec![("ok".into(), ok as Arc<dyn Resolver>)], 8, 5.0));
-        let chain = FallbackResolver::new(primary, fallback);
+        let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_secs(5));
         let resp = chain.resolve(&sample_query()).await.expect("fallback serves");
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+    }
+
+    /// 挂起不返回的解析器：模拟上游无响应（黑洞）。
+    struct Hang;
+    #[async_trait]
+    impl Resolver for Hang {
+        async fn resolve(&self, _q: &Message) -> Result<Message> {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Err(anyhow!("unreachable"))
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_takes_over_when_primary_hangs() {
+        let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
+        let primary = Arc::new(UpstreamGroup::new(
+            vec![("hang".into(), Arc::new(Hang) as Arc<dyn Resolver>)],
+            8,
+            5.0,
+        ));
+        let fallback = Arc::new(UpstreamGroup::new(vec![("ok".into(), ok as Arc<dyn Resolver>)], 8, 5.0));
+        // 主上游黑洞：必须在 upstream_timeout(200ms) 到点后切到 fallback，而不是干等
+        let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_millis(200));
+        let start = std::time::Instant::now();
+        let resp = chain.resolve(&sample_query()).await.expect("fallback serves after timeout");
+        assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(200) && elapsed < std::time::Duration::from_secs(2),
+            "should cut over right after the 200ms primary budget, took {elapsed:?}"
+        );
     }
 }

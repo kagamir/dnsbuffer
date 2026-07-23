@@ -48,7 +48,11 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
         primary
     } else {
         let fb = build_group(&config.fallback, config, &bootstrap).await?;
-        Arc::new(FallbackResolver::new(primary, fb))
+        Arc::new(FallbackResolver::new(
+            primary,
+            fb,
+            std::time::Duration::from_millis(config.server.upstream_timeout_ms),
+        ))
     };
 
     Ok(Arc::new(Pipeline::new(crate::pipeline::PipelineParts {
