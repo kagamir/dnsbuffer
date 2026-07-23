@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 mod config;
+mod resolver;
 
 #[tokio::main]
 async fn main() -> Result<()> {
