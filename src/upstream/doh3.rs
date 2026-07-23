@@ -18,6 +18,9 @@ pub struct H3Conn {
 
 impl H3Conn {
     pub fn new(host: String, port: u16, ips: Vec<IpAddr>, tls: rustls::ClientConfig) -> Result<Self> {
+        if ips.is_empty() {
+            bail!("H3Conn requires at least one ip for {host}");
+        }
         let quic = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .context("building QUIC client config (provider must support QUIC)")?;
         let client_config = quinn::ClientConfig::new(Arc::new(quic));
@@ -67,11 +70,14 @@ impl H3Conn {
     }
 
     pub async fn request(&self, uri: &str, body: Vec<u8>) -> Result<Vec<u8>> {
-        let mut guard = self.state.lock().await;
-        if guard.is_none() {
-            *guard = Some(self.connect().await?);
-        }
-        let sender = guard.as_mut().expect("just set");
+        // 锁内只做取用/建连并克隆 sender；请求发送在锁外，保住 H3 多路复用
+        let mut sender = {
+            let mut guard = self.state.lock().await;
+            if guard.is_none() {
+                *guard = Some(self.connect().await?);
+            }
+            guard.as_ref().expect("just set").clone()
+        };
 
         let req = http::Request::builder()
             .method(http::Method::POST)
@@ -105,7 +111,7 @@ impl H3Conn {
         .await;
 
         if result.is_err() {
-            *guard = None; // 连接可能已坏，下次重建
+            *self.state.lock().await = None; // 连接可能已坏，下次重建
         }
         result
     }
