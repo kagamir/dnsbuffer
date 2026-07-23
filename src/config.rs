@@ -28,11 +28,17 @@ fn default_true() -> bool {
     true
 }
 
+fn default_query_timeout() -> u64 {
+    10
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
     #[serde(default = "default_true")]
     pub tcp: bool,
+    #[serde(default = "default_query_timeout")]
+    pub query_timeout_secs: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -264,5 +270,19 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert!(cfg.validate().is_err(), "bootstrap doh without ips must fail");
+    }
+
+    #[test]
+    fn query_timeout_defaults_to_ten() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.server.query_timeout_secs, 10);
     }
 }

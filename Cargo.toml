@@ -5,16 +5,19 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+arc-swap = "1.9.2"
 async-trait = "0.1.91"
 base64 = "0.22.1"
 bytes = "1.12.1"
 clap = { version = "4.6.4", features = ["derive"] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
+hashlink = "0.12.1"
 hickory-proto = "0.26.1"
 http = "1.4.2"
 http-body-util = "0.1.4"
-hyper = { version = "1.11.0", features = ["client", "http2", "server"] }
+humantime = "2.4.0"
+hyper = { version = "1.11.0", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 quinn = "0.11.11"
 rand = "0.10.2"
