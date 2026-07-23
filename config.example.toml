@@ -2,6 +2,25 @@
 listen = "0.0.0.0:53"
 tcp = true
 
+[selector]
+window = 32
+k = 5.0
+
 [[upstream]]
+type = "doh"
+url = "https://cloudflare-dns.com/dns-query"
+http3 = true
+# ech = ""            # 可选：静态 base64 ECHConfigList；留空则经 bootstrap HTTPS 记录动态获取
+
+[[upstream]]
+type = "dot"
+addr = "9.9.9.9:853"
+domain = "dns.quad9.net"
+
+[[bootstrap.server]]
 type = "plain"
 addr = "1.1.1.1:53"
+
+[[fallback]]
+type = "plain"
+addr = "8.8.8.8:53"

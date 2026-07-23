@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let cfg = config::load(&args.config)?;
-    let pipeline = build_pipeline(&cfg)?;
+    let pipeline = build_pipeline(&cfg).await?;
     tracing::info!("dnsbuffer starting");
     server::run_udp(cfg.server.listen, pipeline).await
 }

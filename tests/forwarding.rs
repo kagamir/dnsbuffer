@@ -61,7 +61,7 @@ async fn proxy_forwards_to_upstream_and_replies() {
         "#
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let pipeline = build_pipeline(&cfg).unwrap();
+    let pipeline = build_pipeline(&cfg).await.unwrap();
 
     tokio::spawn(async move {
         server::run_udp(listen, pipeline).await.unwrap();
@@ -79,5 +79,51 @@ async fn proxy_forwards_to_upstream_and_replies() {
         .unwrap();
     let resp = Message::from_vec(&buf[..n]).unwrap();
     assert_eq!(resp.metadata.id, 0x1111);
+    assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+}
+
+#[tokio::test]
+async fn group_failover_and_fallback_serve() {
+    // 主上游组：一个死端口 + 后备：活 mock → 查询仍应成功
+    let alive = spawn_mock_upstream().await;
+    let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let dead = probe.local_addr().unwrap();
+    drop(probe); // 无人监听 → ECONNREFUSED/超时
+
+    let probe2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let listen = probe2.local_addr().unwrap();
+    drop(probe2);
+
+    let toml = format!(
+        r#"
+        [server]
+        listen = "{listen}"
+
+        [[upstream]]
+        type = "plain"
+        addr = "{dead}"
+
+        [[fallback]]
+        type = "plain"
+        addr = "{alive}"
+        "#
+    );
+    let cfg: Config = toml::from_str(&toml).unwrap();
+    let pipeline = build_pipeline(&cfg).await.unwrap();
+    tokio::spawn(async move {
+        server::run_udp(listen, pipeline).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client.connect(listen).await.unwrap();
+    client.send(&query(0x2222).to_vec().unwrap()).await.unwrap();
+    let mut buf = vec![0u8; 4096];
+    let n = tokio::time::timeout(Duration::from_secs(8), client.recv(&mut buf))
+        .await
+        .expect("no timeout")
+        .unwrap();
+    let resp = Message::from_vec(&buf[..n]).unwrap();
+    assert_eq!(resp.metadata.id, 0x2222);
     assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
 }

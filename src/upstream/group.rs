@@ -1,0 +1,236 @@
+use anyhow::{bail, Result};
+use async_trait::async_trait;
+use hickory_proto::op::Message;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use crate::resolver::Resolver;
+use crate::stats::UpstreamStats;
+use crate::upstream::selector::pick_weighted;
+
+/// 一次查询在组内最多尝试的成员数。
+const MAX_ATTEMPTS: usize = 2;
+
+struct Member {
+    name: String,
+    resolver: Arc<dyn Resolver>,
+    stats: Mutex<UpstreamStats>,
+}
+
+/// 上游组：滑动窗口统计驱动加权随机选择，失败重选，统计反馈。
+pub struct UpstreamGroup {
+    members: Vec<Member>,
+    k: f64,
+}
+
+impl UpstreamGroup {
+    pub fn new(members: Vec<(String, Arc<dyn Resolver>)>, window: usize, k: f64) -> Self {
+        let members = members
+            .into_iter()
+            .map(|(name, resolver)| Member {
+                name,
+                resolver,
+                stats: Mutex::new(UpstreamStats::new(window)),
+            })
+            .collect();
+        Self { members, k }
+    }
+
+    fn weights(&self, exclude: &[usize]) -> Vec<f64> {
+        self.members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                if exclude.contains(&i) {
+                    0.0
+                } else {
+                    m.stats.lock().map(|s| s.weight(self.k)).unwrap_or(0.0)
+                }
+            })
+            .collect()
+    }
+}
+
+#[async_trait]
+impl Resolver for UpstreamGroup {
+    async fn resolve(&self, query: &Message) -> Result<Message> {
+        if self.members.is_empty() {
+            bail!("upstream group is empty");
+        }
+        let attempts = self.members.len().min(MAX_ATTEMPTS);
+        let mut tried: Vec<usize> = Vec::with_capacity(attempts);
+        let mut last: Option<anyhow::Error> = None;
+
+        for _ in 0..attempts {
+            let weights = self.weights(&tried);
+            let Some(idx) = pick_weighted(&weights, rand::random::<f64>()) else {
+                break;
+            };
+            // 全零权重时 pick_weighted 均匀退化可能落在已试成员上；跳过
+            if tried.contains(&idx) {
+                if let Some(untried) = (0..self.members.len()).find(|i| !tried.contains(i)) {
+                    tried.push(untried);
+                    let m = &self.members[untried];
+                    match try_member(m, query).await {
+                        Ok(resp) => return Ok(resp),
+                        Err(e) => last = Some(e),
+                    }
+                    continue;
+                }
+                break;
+            }
+            tried.push(idx);
+            let m = &self.members[idx];
+            match try_member(m, query).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("upstream group exhausted")))
+    }
+}
+
+async fn try_member(m: &Member, query: &Message) -> Result<Message> {
+    let start = Instant::now();
+    match m.resolver.resolve(query).await {
+        Ok(resp) => {
+            if let Ok(mut s) = m.stats.lock() {
+                s.record_success(start.elapsed());
+            }
+            Ok(resp)
+        }
+        Err(e) => {
+            if let Ok(mut s) = m.stats.lock() {
+                s.record_failure();
+            }
+            tracing::warn!("upstream {} failed: {e:#}", m.name);
+            Err(e)
+        }
+    }
+}
+
+/// 主上游组全部失败时切换到后备组。
+pub struct FallbackResolver {
+    primary: Arc<dyn Resolver>,
+    fallback: Arc<dyn Resolver>,
+}
+
+impl FallbackResolver {
+    pub fn new(primary: Arc<dyn Resolver>, fallback: Arc<dyn Resolver>) -> Self {
+        Self { primary, fallback }
+    }
+}
+
+#[async_trait]
+impl Resolver for FallbackResolver {
+    async fn resolve(&self, query: &Message) -> Result<Message> {
+        match self.primary.resolve(query).await {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                tracing::warn!("primary upstreams exhausted, using fallback: {e:#}");
+                self.fallback.resolve(query).await
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resolver::Resolver;
+    use anyhow::{anyhow, Result};
+    use async_trait::async_trait;
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+    use hickory_proto::rr::{Name, RecordType};
+    use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingOk(AtomicUsize);
+    #[async_trait]
+    impl Resolver for CountingOk {
+        async fn resolve(&self, query: &Message) -> Result<Message> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+            resp.metadata.response_code = ResponseCode::NoError;
+            Ok(resp)
+        }
+    }
+
+    struct AlwaysErr(AtomicUsize);
+    #[async_trait]
+    impl Resolver for AlwaysErr {
+        async fn resolve(&self, _q: &Message) -> Result<Message> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow!("dead upstream"))
+        }
+    }
+
+    fn sample_query() -> Message {
+        let mut m = Message::new(0x9, MessageType::Query, OpCode::Query);
+        let mut q = Query::new();
+        q.set_name(Name::from_str("example.com.").unwrap());
+        q.set_query_type(RecordType::A);
+        m.add_query(q);
+        m
+    }
+
+    #[tokio::test]
+    async fn failing_member_retries_on_healthy_one() {
+        let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
+        let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
+        let group = UpstreamGroup::new(
+            vec![
+                ("bad".into(), bad.clone() as Arc<dyn Resolver>),
+                ("ok".into(), ok.clone() as Arc<dyn Resolver>),
+            ],
+            8,
+            5.0,
+        );
+        // 多次调用：每次都应最终成功（坏成员失败后重选好成员）
+        for _ in 0..10 {
+            let resp = group.resolve(&sample_query()).await.expect("group resolves");
+            assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+        }
+        assert!(ok.0.load(Ordering::SeqCst) >= 10, "healthy member served all queries");
+    }
+
+    #[tokio::test]
+    async fn weights_shift_away_from_failures() {
+        let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
+        let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
+        let group = UpstreamGroup::new(
+            vec![
+                ("bad".into(), bad.clone() as Arc<dyn Resolver>),
+                ("ok".into(), ok.clone() as Arc<dyn Resolver>),
+            ],
+            8,
+            5.0,
+        );
+        for _ in 0..50 {
+            let _ = group.resolve(&sample_query()).await;
+        }
+        let bad_hits = bad.0.load(Ordering::SeqCst);
+        let ok_hits = ok.0.load(Ordering::SeqCst);
+        // 权重衰减后坏成员被选中的次数应显著低于好成员
+        assert!(ok_hits > bad_hits, "ok {ok_hits} should exceed bad {bad_hits}");
+    }
+
+    #[tokio::test]
+    async fn all_dead_is_error() {
+        let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
+        let group = UpstreamGroup::new(vec![("bad".into(), bad as Arc<dyn Resolver>)], 8, 5.0);
+        assert!(group.resolve(&sample_query()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fallback_takes_over_when_primary_dies() {
+        let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
+        let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
+        let primary = Arc::new(UpstreamGroup::new(vec![("bad".into(), bad as Arc<dyn Resolver>)], 8, 5.0));
+        let fallback = Arc::new(UpstreamGroup::new(vec![("ok".into(), ok as Arc<dyn Resolver>)], 8, 5.0));
+        let chain = FallbackResolver::new(primary, fallback);
+        let resp = chain.resolve(&sample_query()).await.expect("fallback serves");
+        assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+    }
+}
