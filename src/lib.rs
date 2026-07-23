@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod cache;
 pub mod config;
+pub mod filter;
 pub mod hosts;
 pub mod pipeline;
 pub mod resolver;
