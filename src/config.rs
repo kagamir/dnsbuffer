@@ -20,6 +20,8 @@ pub struct Config {
     pub bootstrap: BootstrapConfig,
     #[serde(default)]
     pub fallback: Vec<UpstreamConfig>,
+    #[serde(default)]
+    pub selector: SelectorConfig,
 }
 
 fn default_true() -> bool {
@@ -41,6 +43,31 @@ pub struct CacheConfig {
 
 fn default_max_entries() -> usize {
     10_000
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SelectorConfig {
+    #[serde(default = "default_window")]
+    pub window: usize,
+    #[serde(default = "default_k")]
+    pub k: f64,
+}
+
+impl Default for SelectorConfig {
+    fn default() -> Self {
+        Self {
+            window: default_window(),
+            k: default_k(),
+        }
+    }
+}
+
+fn default_window() -> usize {
+    32
+}
+
+fn default_k() -> f64 {
+    5.0
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -103,8 +130,10 @@ pub enum UpstreamConfig {
         url: String,
         #[serde(default)]
         ech: String,
-        #[serde(default)]
+        #[serde(default = "default_true")]
         http3: bool,
+        #[serde(default)]
+        ips: Vec<IpAddr>,
     },
     Dot {
         addr: SocketAddr,
@@ -124,6 +153,17 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.upstream.is_empty() {
             bail!("config must define at least one [[upstream]]");
+        }
+        for b in &self.bootstrap.servers {
+            match b {
+                UpstreamConfig::Doh { ips, url, .. } if ips.is_empty() => {
+                    bail!("bootstrap doh {} must specify ips (chicken-and-egg)", url);
+                }
+                UpstreamConfig::Dot { ips: _, addr: _, domain: _ } => {
+                    // addr is the IP, no need for ips
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -169,5 +209,60 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert!(cfg.validate().is_err(), "empty upstream must fail validation");
+    }
+
+    #[test]
+    fn doh_upstream_defaults() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "doh"
+            url = "https://dns.example/dns-query"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        match &cfg.upstream[0] {
+            UpstreamConfig::Doh { url, ech, http3, ips } => {
+                assert_eq!(url, "https://dns.example/dns-query");
+                assert!(ech.is_empty());
+                assert!(*http3, "http3 defaults to true (H3-first design)");
+                assert!(ips.is_empty());
+            }
+            _ => panic!("expected doh upstream"),
+        }
+    }
+
+    #[test]
+    fn selector_defaults() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(cfg.selector.window, 32);
+        assert!((cfg.selector.k - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn bootstrap_doh_without_ips_rejected() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+
+            [[bootstrap.server]]
+            type = "doh"
+            url = "https://bootstrap.example/dns-query"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert!(cfg.validate().is_err(), "bootstrap doh without ips must fail");
     }
 }

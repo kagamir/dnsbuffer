@@ -46,6 +46,14 @@ impl Resolver for PlainResolver {
             .with_context(|| format!("upstream {} timed out", self.addr))?
             .context("receiving response")?;
         let resp = Message::from_vec(&buf[..n]).context("decoding response")?;
+        if resp.metadata.id != query.metadata.id {
+            anyhow::bail!(
+                "upstream {} response id {} does not match query id {}",
+                self.addr,
+                resp.metadata.id,
+                query.metadata.id
+            );
+        }
         Ok(resp)
     }
 }
@@ -59,6 +67,20 @@ mod tests {
     use std::str::FromStr;
     use tokio::net::UdpSocket;
 
+    /// 构造一个基于查询的 NOERROR 响应。
+    fn make_response(query: &Message) -> Message {
+        let mut resp = Message::new(
+            query.metadata.id,
+            MessageType::Response,
+            query.metadata.op_code,
+        );
+        resp.metadata.response_code = ResponseCode::NoError;
+        for q in &query.queries {
+            resp.add_query(q.clone());
+        }
+        resp
+    }
+
     /// 起一个只回固定 NOERROR 响应的 mock UDP DNS 上游，返回其地址。
     async fn spawn_mock_upstream() -> SocketAddr {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -67,15 +89,23 @@ mod tests {
             let mut buf = vec![0u8; 4096];
             let (n, peer) = sock.recv_from(&mut buf).await.unwrap();
             let query = Message::from_vec(&buf[..n]).unwrap();
-            let mut resp = Message::new(
-                query.metadata.id,
-                MessageType::Response,
-                query.metadata.op_code,
-            );
-            resp.metadata.response_code = ResponseCode::NoError;
-            for q in &query.queries {
-                resp.add_query(q.clone());
-            }
+            let resp = make_response(&query);
+            let bytes = resp.to_vec().unwrap();
+            sock.send_to(&bytes, peer).await.unwrap();
+        });
+        addr
+    }
+
+    /// 起一个回复错误 id 响应的 mock UDP DNS 上游。
+    async fn spawn_bad_id_upstream() -> SocketAddr {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let (n, peer) = sock.recv_from(&mut buf).await.unwrap();
+            let query = Message::from_vec(&buf[..n]).unwrap();
+            let mut resp = make_response(&query);
+            resp.metadata.id = query.metadata.id.wrapping_add(1);
             let bytes = resp.to_vec().unwrap();
             sock.send_to(&bytes, peer).await.unwrap();
         });
@@ -99,5 +129,13 @@ mod tests {
         let resp = resolver.resolve(&sample_query()).await.expect("resolve");
         assert_eq!(resp.metadata.id, 0x4242);
         assert_eq!(resp.metadata.message_type, MessageType::Response);
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_response_id() {
+        let addr = spawn_bad_id_upstream().await;
+        let resolver = super::PlainResolver::with_timeout(addr, std::time::Duration::from_secs(2));
+        let err = resolver.resolve(&sample_query()).await;
+        assert!(err.is_err(), "mismatched id must be rejected");
     }
 }
