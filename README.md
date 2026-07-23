@@ -4,17 +4,17 @@
 
 ## 特性
 
-- **DoH 上游**：严格按配置选协议——默认 HTTP/2，`http3 = true` 则仅用 HTTP/3（QUIC），不做协议降级；连接复用、多路复用；`ips` 支持 IPv4/IPv6 混填，拨号地址族偏好可配（`prefer_ipv6`，默认 IPv4 优先），bootstrap 解析结果同序
+- **DoH 上游**：严格按配置选协议——默认 HTTP/2，`http3 = true` 则仅用 HTTP/3（QUIC），不做协议降级；连接复用、多路复用；可用 `ip` 指定单个服务器 IP（v4/v6 皆可），留空经 bootstrap 解析，解析结果按拨号地址族偏好排序（`prefer_ipv6`，默认 IPv4 优先）
 - **ECH（Encrypted Client Hello）**：静态配置 base64 优先，缺省时经 bootstrap 从 HTTPS/SVCB 记录动态获取；均不可用时回退普通 TLS 并告警
-- **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧
+- **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧；`ip` 指定服务器 IP，端口写在 `domain` 中（默认 853）
 - **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选
 - **Bootstrap DNS**：支持 IP / DoH / DoT 形态；非 IP 形态必须显式注明域名对应 IP
 - **对冲式重试**：主上游尝试超过 `hedged_retry_ms`（默认 1000ms）未返回，即并行发起新尝试且不取消在途的（重新加权选择，大概率换上游）；任一返回即胜出，直到 `upstream_timeout_ms` 预算耗尽
 - **后备 DNS**：主上游组全部失败或超时后自动接管（IP / DoH / DoT）
-- **乐观缓存**：纯内存 LRU（hashlink 链式哈希表）——命中即回（过期也返回），过期命中触发后台异步刷新，超限逐出最久未用；只缓存 NoError
+- **乐观缓存**：纯内存 LRU（hashlink 链式哈希表）——命中即回（过期也返回），过期命中触发后台异步刷新，超限逐出最久未用；只缓存 NoError；小内存机器友好——操作系统拒绝内存申请时视作缓存已满，按 LRU 逐出换空间而不是崩溃
 - **自定义 hosts**：精确匹配 + `*.` 通配，直接本地应答
 - **广告屏蔽**：adblock 语法子集（`||domain^`、`@@||domain^` 例外）+ hosts 语法 + 纯域名列表；本地文件与远程 URL 混用，远程源支持按周期热更新（ArcSwap 无锁替换）；命中返回 `0.0.0.0` / `::`；豁免列表优先
-- **EDNS 客户端子网（ECS）**：`auto`（启动探测出口 IP，取 /24、/56，私网/CGNAT 自动禁用）、`fixed`（配置固定子网）、`disabled`；始终剥离客户端自带 ECS 保护隐私
+- **EDNS 客户端子网（ECS）**：配置 `fixed_subnet` 则注入该子网，不配置则不使用 ECS；始终剥离客户端自带 ECS 保护隐私
 - **健壮性**：响应 id 全链路校验、单查询总超时预算、任何上游故障均降级为 SERVFAIL 而非崩溃
 
 ## 构建
@@ -53,8 +53,7 @@ hedged_retry_ms = 1000       # 对冲式重试间隔（毫秒）；0 禁用
 max_entries = 10000          # LRU 缓存最大条数
 
 [ecs]
-mode = "auto"                # auto | fixed | disabled
-# fixed_subnet = "203.0.113.0/24"   # mode = "fixed" 时必填
+# fixed_subnet = "203.0.113.0/24"   # 配置则注入该子网作为 ECS；不配置则不使用 ECS
 
 [selector]                   # 上游加权随机参数
 window = 32                  # 滑动窗口样本数
@@ -82,12 +81,12 @@ type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
 http3 = true                 # 默认 http/2；显式 true 则仅用 http/3（严格按配置，不回退 H2）
 # ech = "base64..."          # 可选：静态 ECHConfigList；留空自动经 HTTPS 记录获取
-# ips = ["2606:4700::6810:f8f9", "104.16.248.249"]  # 可选：v4/v6 混填皆可，次序按 prefer_ipv6 整理；留空经 bootstrap 解析域名
+# ip = "104.16.248.249"     # 可选：该域名的 IP（仅一个，v4/v6 皆可）；留空经 bootstrap 解析域名
 
 [[upstream]]
 type = "dot"
-addr = "9.9.9.9:853"
-domain = "dns.quad9.net"     # TLS SNI / 证书校验域名
+ip = "9.9.9.9"
+domain = "dns.quad9.net"     # TLS SNI / 证书校验域名；端口写在这里（如 "dns.quad9.net:8853"），默认 853
 
 [[upstream]]
 type = "plain"               # 明文 UDP（不推荐作主上游）
@@ -99,11 +98,11 @@ addr = "1.1.1.1:53"
 type = "plain"
 addr = "1.1.1.1:53"
 
-# bootstrap 也可用 doh/dot，但必须显式给出 ips：
+# bootstrap 也可用 doh/dot，但必须显式给出 ip：
 # [[bootstrap.server]]
 # type = "doh"
 # url = "https://bootstrap.example/dns-query"
-# ips = ["203.0.113.10"]     # 非 IP 形态必填
+# ip = "203.0.113.10"        # 非 IP 形态必填
 
 # ---- 后备：主上游组全部失败时接管 ----
 

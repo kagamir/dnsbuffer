@@ -24,14 +24,16 @@ impl Bootstrap {
         for s in servers {
             let r: Arc<dyn Resolver> = match s {
                 UpstreamConfig::Plain { addr } => Arc::new(PlainResolver::new(*addr)),
-                UpstreamConfig::Dot { addr, domain, .. } => {
+                UpstreamConfig::Dot { ip, domain } => {
+                    let (host, port) = crate::config::split_domain_port(domain)?;
                     let tls = Arc::new(crate::tls::client_config(&[], &[], None)?);
-                    Arc::new(DotResolver::new(*addr, domain, tls)?)
+                    Arc::new(DotResolver::new(std::net::SocketAddr::new(*ip, port), &host, tls)?)
                 }
-                UpstreamConfig::Doh { url, ips, http3, .. } => {
-                    // bootstrap 无 ECH（validate 已保证 ips 非空）；
+                UpstreamConfig::Doh { url, ip, http3, .. } => {
+                    // bootstrap 无 ECH（validate 已保证 ip 非空）；
                     // 默认 H2，配置显式 http3 = true 才启用 H3
-                    Arc::new(DohResolver::new(url, ips.clone(), None, *http3, prefer_ipv6)?)
+                    let ips: Vec<IpAddr> = ip.iter().copied().collect();
+                    Arc::new(DohResolver::new(url, ips, None, *http3, prefer_ipv6)?)
                 }
             };
             resolvers.push(r);

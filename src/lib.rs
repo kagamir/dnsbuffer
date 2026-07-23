@@ -44,7 +44,7 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
 
     let hosts = crate::hosts::HostsMap::from_entries(&config.hosts);
     let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
-    let ecs = crate::ecs::subnet_from_config(&config.ecs).await;
+    let ecs = crate::ecs::subnet_from_config(&config.ecs);
 
     let mut primary = build_group(&config.upstream, config, &bootstrap).await?;
     // 对冲式重试：主上游尝试超过 hedged_retry_ms 未返回即并行再发，0 禁用
@@ -101,20 +101,25 @@ async fn build_member(
         UpstreamConfig::Plain { addr } => {
             Ok((format!("plain:{addr}"), Arc::new(PlainResolver::new(*addr))))
         }
-        UpstreamConfig::Dot { addr, domain, .. } => {
+        UpstreamConfig::Dot { ip, domain } => {
+            let (host, port) = crate::config::split_domain_port(domain)?;
             let tls = Arc::new(crate::tls::client_config(&[], &[], None)?);
-            Ok((format!("dot:{domain}"), Arc::new(DotResolver::new(*addr, domain, tls)?)))
+            Ok((
+                format!("dot:{host}"),
+                Arc::new(DotResolver::new(std::net::SocketAddr::new(*ip, port), &host, tls)?),
+            ))
         }
-        UpstreamConfig::Doh { url, ech, http3, ips } => {
+        UpstreamConfig::Doh { url, ech, http3, ip } => {
             let uri: http::Uri = url.parse()?;
             let host = uri.host().unwrap_or_default().to_string();
-            let ips = if ips.is_empty() {
-                if bootstrap.is_empty() {
-                    anyhow::bail!("doh upstream {url} has no ips and no bootstrap configured");
+            let ips = match ip {
+                Some(ip) => vec![*ip],
+                None => {
+                    if bootstrap.is_empty() {
+                        anyhow::bail!("doh upstream {url} has no ip and no bootstrap configured");
+                    }
+                    bootstrap.resolve_ips(&host).await?
                 }
-                bootstrap.resolve_ips(&host).await?
-            } else {
-                ips.clone()
             };
             let ech_bytes = if ech.is_empty() {
                 if bootstrap.is_empty() {

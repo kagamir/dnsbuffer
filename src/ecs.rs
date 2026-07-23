@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use hickory_proto::op::Message;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::config::{EcsConfig, EcsMode};
+use crate::config::EcsConfig;
 
 /// ECS 子网：地址已按前缀掩码归零。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -11,18 +11,18 @@ pub struct EcsSubnet {
     pub prefix: u8,
 }
 
-/// 把 IP 掩码到指定前缀（v4 用 `v4_prefix`，v6 用 `v6_prefix`）。
-pub fn mask_ip(ip: IpAddr, v4_prefix: u8, v6_prefix: u8) -> EcsSubnet {
+/// 把 IP 掩码到指定前缀（调用方保证前缀不超过地址族位宽）。
+pub fn mask_ip(ip: IpAddr, prefix: u8) -> EcsSubnet {
     match ip {
         IpAddr::V4(v4) => {
             let bits = u32::from(v4);
-            let mask = if v4_prefix == 0 { 0 } else { u32::MAX << (32 - v4_prefix) };
-            EcsSubnet { addr: IpAddr::V4(Ipv4Addr::from(bits & mask)), prefix: v4_prefix }
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            EcsSubnet { addr: IpAddr::V4(Ipv4Addr::from(bits & mask)), prefix }
         }
         IpAddr::V6(v6) => {
             let bits = u128::from(v6);
-            let mask = if v6_prefix == 0 { 0 } else { u128::MAX << (128 - v6_prefix) };
-            EcsSubnet { addr: IpAddr::V6(Ipv6Addr::from(bits & mask)), prefix: v6_prefix }
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            EcsSubnet { addr: IpAddr::V6(Ipv6Addr::from(bits & mask)), prefix }
         }
     }
 }
@@ -36,68 +36,18 @@ pub fn parse_subnet(s: &str) -> Result<EcsSubnet> {
     if prefix > max {
         bail!("prefix /{prefix} out of range for {s}");
     }
-    Ok(match addr {
-        IpAddr::V4(_) => mask_ip(addr, prefix, 0),
-        IpAddr::V6(_) => mask_ip(addr, 0, prefix),
-    })
+    Ok(mask_ip(addr, prefix))
 }
 
-/// 排除 loopback/私有(10/8、172.16/12、192.168/16)/链路本地/ULA(fc00::/7)/未指定地址。
-pub fn is_global(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            !(v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)) // CGNAT 100.64.0.0/10
+/// 配置了 `fixed_subnet` 则解析使用，否则不注入 ECS；解析失败 warn 并禁用。
+pub fn subnet_from_config(cfg: &EcsConfig) -> Option<EcsSubnet> {
+    let s = cfg.fixed_subnet.as_deref()?;
+    match parse_subnet(s) {
+        Ok(sub) => Some(sub),
+        Err(e) => {
+            tracing::warn!("invalid ecs.fixed_subnet, ECS disabled: {e:#}");
+            None
         }
-        IpAddr::V6(v6) => {
-            let seg0 = v6.segments()[0];
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || (seg0 & 0xffc0) == 0xfe80 // 链路本地 fe80::/10
-                || (seg0 & 0xfe00) == 0xfc00) // ULA fc00::/7
-        }
-    }
-}
-
-/// UDP connect 不发包即可取出口地址；v4 失败则尝试 v6。
-pub async fn detect_egress() -> Result<IpAddr> {
-    for target in ["8.8.8.8:53", "[2001:4860:4860::8888]:53"] {
-        let bind = if target.starts_with('[') { "[::]:0" } else { "0.0.0.0:0" };
-        if let Ok(sock) = tokio::net::UdpSocket::bind(bind).await
-            && sock.connect(target).await.is_ok()
-            && let Ok(local) = sock.local_addr()
-        {
-            return Ok(local.ip());
-        }
-    }
-    bail!("cannot detect egress ip")
-}
-
-/// 依据配置得出应注入的 ECS 子网；`Disabled` 直接 None，`Fixed`/`Auto` 失败时 warn 并回退 None。
-pub async fn subnet_from_config(cfg: &EcsConfig) -> Option<EcsSubnet> {
-    match cfg.mode {
-        EcsMode::Disabled => None,
-        EcsMode::Fixed => match parse_subnet(&cfg.fixed_subnet) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!("invalid ecs.fixed_subnet, ECS disabled: {e:#}");
-                None
-            }
-        },
-        EcsMode::Auto => match detect_egress().await {
-            Ok(ip) if is_global(&ip) => Some(mask_ip(ip, 24, 56)),
-            Ok(ip) => {
-                tracing::warn!("egress ip {ip} is not global, ECS disabled");
-                None
-            }
-            Err(e) => {
-                tracing::warn!("egress detection failed, ECS disabled: {e:#}");
-                None
-            }
-        },
     }
 }
 
@@ -120,10 +70,10 @@ mod tests {
 
     #[test]
     fn masks_v4_to_24_and_v6_to_56() {
-        let v4 = mask_ip(IpAddr::from_str("203.0.113.77").unwrap(), 24, 56);
+        let v4 = mask_ip(IpAddr::from_str("203.0.113.77").unwrap(), 24);
         assert_eq!(v4.addr, IpAddr::from_str("203.0.113.0").unwrap());
         assert_eq!(v4.prefix, 24);
-        let v6 = mask_ip(IpAddr::from_str("2001:db8:aaaa:bbcc:1:2:3:4").unwrap(), 24, 56);
+        let v6 = mask_ip(IpAddr::from_str("2001:db8:aaaa:bbcc:1:2:3:4").unwrap(), 56);
         assert_eq!(v6.addr, IpAddr::from_str("2001:db8:aaaa:bb00::").unwrap());
         assert_eq!(v6.prefix, 56);
     }
@@ -138,19 +88,15 @@ mod tests {
     }
 
     #[test]
-    fn global_detection() {
-        assert!(is_global(&IpAddr::from_str("203.0.113.1").unwrap()));
-        for private in [
-            "10.0.0.1",
-            "172.16.5.5",
-            "192.168.1.1",
-            "127.0.0.1",
-            "fe80::1",
-            "fd00::1",
-            "100.64.1.1",
-        ] {
-            assert!(!is_global(&IpAddr::from_str(private).unwrap()), "{private} is not global");
-        }
+    fn subnet_from_config_uses_fixed_subnet_or_disables() {
+        let none = EcsConfig { fixed_subnet: None };
+        assert_eq!(subnet_from_config(&none), None, "no fixed_subnet means ECS off");
+        let some = EcsConfig { fixed_subnet: Some("203.0.113.0/24".into()) };
+        let subnet = subnet_from_config(&some).expect("valid subnet enables ECS");
+        assert_eq!(subnet.addr, IpAddr::from_str("203.0.113.0").unwrap());
+        assert_eq!(subnet.prefix, 24);
+        let bad = EcsConfig { fixed_subnet: Some("not-a-subnet".into()) };
+        assert_eq!(subnet_from_config(&bad), None, "invalid subnet warns and disables");
     }
 
     #[test]

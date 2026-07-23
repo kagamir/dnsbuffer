@@ -9,8 +9,7 @@ hedged_retry_ms = 1000           # 对冲式重试间隔：超时未返回即并
 max_entries = 10000
 
 [ecs]
-mode = "auto"            # auto | fixed | disabled
-# fixed_subnet = "203.0.113.0/24"
+# fixed_subnet = "203.0.113.0/24"   # 配置则注入该子网作为 ECS；不配置则不使用 ECS
 
 [selector]
 window = 32
@@ -36,12 +35,12 @@ type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
 http3 = true             # 默认 http/2；显式设 true 则仅用 http/3（严格按配置，不回退 H2）
 # ech = ""            # 可选：静态 base64 ECHConfigList；留空则经 bootstrap HTTPS 记录动态获取
-# ips = ["2606:4700::6810:f8f9", "104.16.248.249"]  # 可选：v4/v6 混填皆可，次序按 prefer_ipv6 整理；留空经 bootstrap 解析
+# ip = "104.16.248.249"  # 可选：该域名的 IP（仅一个，v4/v6 皆可）；留空经 bootstrap 解析
 
 [[upstream]]
 type = "dot"
-addr = "9.9.9.9:853"
-domain = "dns.quad9.net"
+ip = "9.9.9.9"
+domain = "dns.quad9.net"     # 端口写在这里（如 "dns.quad9.net:8853"），默认 853
 
 [[bootstrap.server]]
 type = "plain"

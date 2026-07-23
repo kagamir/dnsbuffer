@@ -63,6 +63,11 @@ impl Cache {
         };
         if let Ok(mut map) = self.map.lock() {
             map.remove(&key); // 旧条目移除，保证重新入队尾
+            // 小内存机器：操作系统拒绝内存申请时视作队列已满，按 LRU 逐出换空间；
+            // 全部逐出仍申请不到则放弃本次写入（丢一条缓存无害）。
+            if !reserve_or_evict(&mut map, 1) {
+                return;
+            }
             map.insert(key, entry);
             while map.len() > self.max_entries {
                 map.pop_front();
@@ -77,6 +82,17 @@ impl Cache {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// 为将插入的 `want` 条预留空间；分配失败则按 LRU 逐出最久未用重试。
+/// 返回 false 表示逐空后仍申请不到内存。
+fn reserve_or_evict(map: &mut LinkedHashMap<CacheKey, CacheEntry>, want: usize) -> bool {
+    while map.try_reserve(want).is_err() {
+        if map.pop_front().is_none() {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -143,6 +159,23 @@ mod tests {
         assert!(cache.get(&key("b.com."), 7).is_none());
         assert!(cache.get(&key("a.com."), 7).is_some());
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn reserve_failure_evicts_lru_until_empty() {
+        let mut map = LinkedHashMap::new();
+        let entry = |name: &str| CacheEntry {
+            message: response(1, name, 300),
+            expires_at: Instant::now(),
+        };
+        map.insert(key("a.com."), entry("a.com."));
+        map.insert(key("b.com."), entry("b.com."));
+        // 用不可能满足的容量模拟 OS 拒绝内存申请：应先按 LRU 逐出，逐空仍失败则放弃
+        assert!(!reserve_or_evict(&mut map, isize::MAX as usize), "impossible reservation fails");
+        assert!(map.is_empty(), "entries evicted while trying to make room");
+        map.insert(key("c.com."), entry("c.com."));
+        assert!(reserve_or_evict(&mut map, 1), "normal reservation succeeds");
+        assert_eq!(map.len(), 1, "success path must not evict");
     }
 
     #[test]

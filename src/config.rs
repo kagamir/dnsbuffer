@@ -91,19 +91,9 @@ fn default_k() -> f64 {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct EcsConfig {
+    /// 配置了子网（如 "203.0.113.0/24"）则注入 ECS，否则不使用 ECS。
     #[serde(default)]
-    pub mode: EcsMode,
-    #[serde(default)]
-    pub fixed_subnet: String,
-}
-
-#[derive(Debug, Default, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum EcsMode {
-    #[default]
-    Auto,
-    Fixed,
-    Disabled,
+    pub fixed_subnet: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -152,15 +142,28 @@ pub enum UpstreamConfig {
         /// 默认 HTTP/2；显式 http3 = true 则仅用 HTTP/3（严格按配置，不回退 H2）。
         #[serde(default)]
         http3: bool,
+        /// 可选：该 DoH 域名的 IP（仅一个）；留空经 bootstrap 解析域名。
         #[serde(default)]
-        ips: Vec<IpAddr>,
+        ip: Option<IpAddr>,
     },
     Dot {
-        addr: SocketAddr,
+        /// 服务器 IP；端口写在 domain 里（`host` 或 `host:port`），默认 853。
+        ip: IpAddr,
         domain: String,
-        #[serde(default)]
-        ips: Vec<IpAddr>,
     },
+}
+
+/// 拆分 DoT 的 `domain` 为（SNI 主机名, 端口）；未写端口默认 853。
+pub fn split_domain_port(domain: &str) -> Result<(String, u16)> {
+    match domain.rsplit_once(':') {
+        Some((host, port)) => {
+            let port: u16 = port
+                .parse()
+                .with_context(|| format!("invalid port in dot domain {domain}"))?;
+            Ok((host.to_string(), port))
+        }
+        None => Ok((domain.to_string(), 853)),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -175,14 +178,8 @@ impl Config {
             bail!("config must define at least one [[upstream]]");
         }
         for b in &self.bootstrap.servers {
-            match b {
-                UpstreamConfig::Doh { ips, url, .. } if ips.is_empty() => {
-                    bail!("bootstrap doh {url} must specify ips (chicken-and-egg)");
-                }
-                UpstreamConfig::Dot { ips: _, addr: _, domain: _ } => {
-                    // addr is the IP, no need for ips
-                }
-                _ => {}
+            if let UpstreamConfig::Doh { ip: None, url, .. } = b {
+                bail!("bootstrap doh {url} must specify ip (chicken-and-egg)");
             }
         }
         Ok(())
@@ -242,36 +239,63 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         match &cfg.upstream[0] {
-            UpstreamConfig::Doh { url, ech, http3, ips } => {
+            UpstreamConfig::Doh { url, ech, http3, ip } => {
                 assert_eq!(url, "https://dns.example/dns-query");
                 assert!(ech.is_empty());
                 assert!(!*http3, "http3 defaults to false (opt-in via http3 = true)");
-                assert!(ips.is_empty());
+                assert!(ip.is_none(), "ip defaults to unset (resolve via bootstrap)");
             }
             _ => panic!("expected doh upstream"),
         }
     }
 
     #[test]
-    fn ips_accept_ipv6_literals() {
-        let toml = r#"
+    fn doh_ip_accepts_v4_and_v6_literal() {
+        let base = r#"
             [server]
             listen = "127.0.0.1:5300"
 
             [[upstream]]
             type = "doh"
             url = "https://dns.example/dns-query"
-            ips = ["2606:4700::6810:f8f9", "104.16.248.249"]
+            ip = "{ip}"
+        "#;
+        for (literal, is_v6) in [("2606:4700::6810:f8f9", true), ("104.16.248.249", false)] {
+            let cfg: Config = toml::from_str(&base.replace("{ip}", literal)).expect("parse");
+            match &cfg.upstream[0] {
+                UpstreamConfig::Doh { ip: Some(ip), .. } => assert_eq!(ip.is_ipv6(), is_v6),
+                _ => panic!("expected doh upstream with ip"),
+            }
+        }
+    }
+
+    #[test]
+    fn dot_uses_ip_and_domain_with_optional_port() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "dot"
+            ip = "9.9.9.9"
+            domain = "dns.quad9.net"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         match &cfg.upstream[0] {
-            UpstreamConfig::Doh { ips, .. } => {
-                assert_eq!(ips.len(), 2);
-                assert!(ips[0].is_ipv6(), "ipv6 literal parses");
-                assert!(ips[1].is_ipv4());
+            UpstreamConfig::Dot { ip, domain } => {
+                assert_eq!(ip.to_string(), "9.9.9.9");
+                assert_eq!(domain, "dns.quad9.net");
             }
-            _ => panic!("expected doh upstream"),
+            _ => panic!("expected dot upstream"),
         }
+    }
+
+    #[test]
+    fn split_domain_port_defaults_to_853() {
+        assert_eq!(split_domain_port("dns.quad9.net").unwrap(), ("dns.quad9.net".into(), 853));
+        assert_eq!(split_domain_port("dns.quad9.net:8853").unwrap(), ("dns.quad9.net".into(), 8853));
+        assert!(split_domain_port("dns.quad9.net:notaport").is_err());
+        assert!(split_domain_port("dns.quad9.net:99999").is_err(), "port out of u16 range");
     }
 
     #[test]
@@ -290,7 +314,34 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_doh_without_ips_rejected() {
+    fn ecs_defaults_to_no_subnet() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        assert!(cfg.ecs.fixed_subnet.is_none(), "no fixed_subnet means ECS off");
+        let with = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [ecs]
+            fixed_subnet = "203.0.113.0/24"
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(with).expect("parse");
+        assert_eq!(cfg.ecs.fixed_subnet.as_deref(), Some("203.0.113.0/24"));
+    }
+
+    #[test]
+    fn bootstrap_doh_without_ip_rejected() {
         let toml = r#"
             [server]
             listen = "127.0.0.1:5300"
@@ -304,7 +355,7 @@ mod tests {
             url = "https://bootstrap.example/dns-query"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.validate().is_err(), "bootstrap doh without ips must fail");
+        assert!(cfg.validate().is_err(), "bootstrap doh without ip must fail");
     }
 
     #[test]
@@ -321,6 +372,12 @@ mod tests {
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
         assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
         assert_eq!(cfg.server.hedged_retry_ms, 1_000, "hedged retry interval defaults to 1s");
+    }
+
+    #[test]
+    fn example_config_stays_valid() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+        load(&path).expect("config.example.toml must parse and validate");
     }
 
     #[test]
