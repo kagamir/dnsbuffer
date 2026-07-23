@@ -6,8 +6,8 @@ use tokio::sync::Mutex;
 
 type H3Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
-/// 惰性建立并复用的 HTTP/3 (QUIC) 连接。发送失败时重建一次由调用方驱动
-/// （request 内部清空状态后返回错误，DohResolver 的 H2 回退接管）。
+/// 惰性建立并复用的 HTTP/3 (QUIC) 连接。发送失败时 request 内部清空状态后
+/// 返回错误（下次调用重建连接），由上层（组内重选/对冲/fallback）兜底。
 pub struct H3Conn {
     host: String,
     port: u16,
@@ -25,7 +25,7 @@ impl H3Conn {
             .context("building QUIC client config (provider must support QUIC)")?;
         let client_config = quinn::ClientConfig::new(Arc::new(quic));
         // 列表含任意 v6 就绑 [::]（quinn 会把 v4 目标映射为 v6-mapped 一并可达）；
-        // 纯 v4 或本机无 v6 栈时退回 0.0.0.0（此时 v6 目标逐个失败，由重选/H2 兜底）。
+        // 纯 v4 或本机无 v6 栈时退回 0.0.0.0（此时 v6 目标逐个失败，由重选/fallback 兜底）。
         let v4_bind: SocketAddr = "0.0.0.0:0".parse().expect("static addr");
         let mut endpoint = if ips.iter().any(|ip| ip.is_ipv6()) {
             quinn::Endpoint::client("[::]:0".parse().expect("static addr")).or_else(|e| {

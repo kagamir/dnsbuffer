@@ -18,7 +18,8 @@ use crate::resolver::Resolver;
 type H2Sender = hyper::client::conn::http2::SendRequest<Full<Bytes>>;
 
 /// DNS-over-HTTPS 上游（RFC 8484，POST application/dns-message）。
-/// http3=true 时先试 H3（doh3 模块），失败回退 H2；H2 连接复用，断线重连一次。
+/// 严格按配置选协议：http3=true 仅用 H3（doh3 模块），否则仅用 H2（连接复用，断线重连一次）。
+/// H3 失败不降级 H2，由上层（组内重选/对冲/fallback）兜底。
 pub struct DohResolver {
     host: String,
     port: u16,
@@ -199,17 +200,14 @@ impl DohResolver {
 impl Resolver for DohResolver {
     async fn resolve(&self, query: &Message) -> Result<Message> {
         if self.http3 {
-            match timeout(self.timeout, self.resolve_h3(query)).await {
-                Ok(Ok(resp)) => return Ok(resp),
-                Ok(Err(e)) => {
-                    tracing::warn!("DoH h3 failed for {}, falling back to h2: {e:#}", self.host)
-                }
-                Err(_) => tracing::warn!("DoH h3 timed out for {}, falling back to h2", self.host),
-            }
+            timeout(self.timeout, self.resolve_h3(query))
+                .await
+                .with_context(|| format!("DoH upstream {} (h3) timed out", self.host))?
+        } else {
+            timeout(self.timeout, self.resolve_h2(query))
+                .await
+                .with_context(|| format!("DoH upstream {} timed out", self.host))?
         }
-        timeout(self.timeout, self.resolve_h2(query))
-            .await
-            .with_context(|| format!("DoH upstream {} timed out", self.host))?
     }
 }
 
@@ -393,26 +391,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn h3_failure_falls_back_to_h2() {
+    async fn h3_strict_errors_when_no_h3_endpoint() {
         let (addr, root) = spawn_mock_doh_server().await;
         let url = format!("https://localhost:{}/dns-query", addr.port());
         let mut resolver = DohResolver::with_extra_roots(
             &url,
             vec![addr.ip()],
             None,
-            true, // http3 开启但 mock 无 H3 端点：真实 QUIC 连接会失败/超时 → 必须回退 H2 成功
+            true, // http3 = true 严格走 H3；mock 只有 TCP(H2) 端点 → 必须失败而非回退 H2
             false,
             &[root],
         )
         .unwrap();
-        // mock 服务器只监听 TCP，没有 UDP 端点：QUIC 连接会一直等到 idle timeout 才失败。
-        // 缩短超时，让 h3 分支尽快让位给 h2 回退，避免测试变慢。
+        // mock 服务器无 UDP 端点：QUIC 会等到 idle timeout。缩短超时避免测试变慢。
         resolver.set_timeout(Duration::from_millis(300));
-        let resp = resolver
-            .resolve(&sample_query())
-            .await
-            .expect("h3->h2 fallback");
-        assert_eq!(resp.metadata.id, 0x6161);
+        assert!(
+            resolver.resolve(&sample_query()).await.is_err(),
+            "strict h3 must not silently fall back to h2"
+        );
     }
 
     #[tokio::test]

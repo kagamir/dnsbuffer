@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **DoH 上游**：HTTP/3（QUIC）优先，失败运行时回退 HTTP/2；连接复用、多路复用；`ips` 支持 IPv4/IPv6 混填，拨号地址族偏好可配（`prefer_ipv6`，默认 IPv4 优先），bootstrap 解析结果同序
+- **DoH 上游**：严格按配置选协议——默认 HTTP/2，`http3 = true` 则仅用 HTTP/3（QUIC），不做协议降级；连接复用、多路复用；`ips` 支持 IPv4/IPv6 混填，拨号地址族偏好可配（`prefer_ipv6`，默认 IPv4 优先），bootstrap 解析结果同序
 - **ECH（Encrypted Client Hello）**：静态配置 base64 优先，缺省时经 bootstrap 从 HTTPS/SVCB 记录动态获取；均不可用时回退普通 TLS 并告警
 - **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧
 - **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选
@@ -80,7 +80,7 @@ addrs = ["192.168.1.1", "fd00::1"]
 [[upstream]]
 type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
-http3 = true                 # 默认 http/2；显式 true 才启用 H3（H3 优先、失败回退 H2）
+http3 = true                 # 默认 http/2；显式 true 则仅用 http/3（严格按配置，不回退 H2）
 # ech = "base64..."          # 可选：静态 ECHConfigList；留空自动经 HTTPS 记录获取
 # ips = ["2606:4700::6810:f8f9", "104.16.248.249"]  # 可选：v4/v6 混填皆可，次序按 prefer_ipv6 整理；留空经 bootstrap 解析域名
 
@@ -161,7 +161,7 @@ src/
   upstream/
     plain.rs      明文 UDP 上游
     dot.rs        DoT 上游
-    doh.rs        DoH 上游（H2 + H3 编排与回退）
+    doh.rs        DoH 上游（按配置严格走 H2 或 H3）
     doh3.rs       HTTP/3 连接封装（quinn/h3）
     selector.rs   加权随机抽取（纯函数）
     group.rs      上游组（统计反馈 + 重选）+ FallbackResolver

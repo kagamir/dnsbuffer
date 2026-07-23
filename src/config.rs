@@ -149,7 +149,7 @@ pub enum UpstreamConfig {
         url: String,
         #[serde(default)]
         ech: String,
-        /// 默认 HTTP/2；显式 http3 = true 才启用 HTTP/3（H3 优先、失败回退 H2）。
+        /// 默认 HTTP/2；显式 http3 = true 则仅用 HTTP/3（严格按配置，不回退 H2）。
         #[serde(default)]
         http3: bool,
         #[serde(default)]
