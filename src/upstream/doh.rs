@@ -55,10 +55,11 @@ impl DohResolver {
         }
         let host = uri.host().context("DoH url missing host")?.to_string();
         let port = uri.port_u16().unwrap_or(443);
-        let path = if uri.path().is_empty() {
-            "/dns-query".into()
+        let p = uri.path();
+        let path = if p.is_empty() || p == "/" {
+            "/dns-query".to_string()
         } else {
-            uri.path().to_string()
+            p.to_string()
         };
         if ips.is_empty() {
             bail!("DoH resolver for {host} constructed without ips (bootstrap it first)");
@@ -114,13 +115,15 @@ impl DohResolver {
 
     async fn resolve_h2(&self, query: &Message) -> Result<Message> {
         let body = query.to_vec().context("encoding query")?;
-        // 复用连接；发送失败清空后重连一次
         for attempt in 0..2 {
-            let mut guard = self.h2.lock().await;
-            if guard.is_none() {
-                *guard = Some(self.connect_h2().await?);
-            }
-            let sender = guard.as_mut().expect("just set");
+            // 锁内只做取用/建连并克隆 sender；请求发送在锁外，保住 H2 多路复用
+            let mut sender = {
+                let mut guard = self.h2.lock().await;
+                if guard.is_none() {
+                    *guard = Some(self.connect_h2().await?);
+                }
+                guard.as_ref().expect("just set").clone()
+            };
             let req = http::Request::builder()
                 .method(http::Method::POST)
                 .uri(format!("https://{}:{}{}", self.host, self.port, self.path))
@@ -130,7 +133,6 @@ impl DohResolver {
                 .context("building request")?;
             match sender.send_request(req).await {
                 Ok(resp) => {
-                    drop(guard);
                     if resp.status() != http::StatusCode::OK {
                         bail!("DoH upstream {} returned {}", self.host, resp.status());
                     }
@@ -147,7 +149,7 @@ impl DohResolver {
                     return Ok(msg);
                 }
                 Err(e) => {
-                    *guard = None; // 连接失效，下轮重连
+                    *self.h2.lock().await = None; // 连接失效，下轮重连
                     if attempt == 1 {
                         return Err(e).context("h2 send_request failed after reconnect");
                     }
@@ -155,7 +157,7 @@ impl DohResolver {
                 }
             }
         }
-        unreachable!("loop returns or errors")
+        bail!("h2 retry loop exhausted")
     }
 
     async fn resolve_h3(&self, _query: &Message) -> Result<Message> {
@@ -221,7 +223,14 @@ mod tests {
             let (tcp, _) = listener.accept().await.unwrap();
             let tls = acceptor.accept(tcp).await.unwrap();
             let service = service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
-                assert_eq!(req.method(), hyper::Method::POST);
+                if req.method() != hyper::Method::POST || req.uri().path() != "/dns-query" {
+                    return Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(400)
+                            .body(Full::new(Bytes::new()))
+                            .unwrap(),
+                    );
+                }
                 let body = req.into_body().collect().await.unwrap().to_bytes();
                 let query = Message::from_vec(&body).unwrap();
                 let mut resp =
@@ -291,6 +300,19 @@ mod tests {
             .resolve(&sample_query())
             .await
             .expect("h3->h2 fallback");
+        assert_eq!(resp.metadata.id, 0x6161);
+    }
+
+    #[tokio::test]
+    async fn bare_url_defaults_to_dns_query_path() {
+        let (addr, root) = spawn_mock_doh_server().await;
+        let url = format!("https://localhost:{}", addr.port()); // 无 path
+        let resolver =
+            DohResolver::with_extra_roots(&url, vec![addr.ip()], None, false, &[root]).unwrap();
+        let resp = resolver
+            .resolve(&sample_query())
+            .await
+            .expect("bare url hits /dns-query");
         assert_eq!(resp.metadata.id, 0x6161);
     }
 }
