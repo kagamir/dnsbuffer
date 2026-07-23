@@ -86,7 +86,14 @@ mod tests {
 
     #[tokio::test]
     async fn serves_udp_query_end_to_end() {
-        let pipeline = crate::pipeline::Pipeline::new(std::sync::Arc::new(EchoOk));
+        let pipeline = crate::pipeline::Pipeline::new(crate::pipeline::PipelineParts {
+            hosts: crate::hosts::HostsMap::from_entries(&[]),
+            filter: std::sync::Arc::new(crate::filter::Filter::new(&[])),
+            cache: std::sync::Arc::new(crate::cache::Cache::new(16)),
+            upstream: std::sync::Arc::new(EchoOk),
+            ecs: None,
+            query_timeout: Duration::from_secs(5),
+        });
         // 绑定随机端口获取地址，再交给 run_udp。
         let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
         let bound = UdpSocket::bind(listen).await.unwrap();

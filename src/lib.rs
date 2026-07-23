@@ -22,9 +22,27 @@ use crate::pipeline::Pipeline;
 use crate::resolver::Resolver;
 use crate::upstream::group::{FallbackResolver, UpstreamGroup};
 
-/// 依据配置构建完整解析链：bootstrap → 上游组 →（可选）后备组。
+/// 依据配置构建完整解析链：bootstrap → filter → hosts → cache → ECS → 上游组
+/// →（可选）后备组 → Pipeline 装配。
 pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
-    let bootstrap = Bootstrap::from_config(&config.bootstrap.servers)?;
+    let bootstrap = Arc::new(Bootstrap::from_config(&config.bootstrap.servers)?);
+
+    // 广告屏蔽：初次加载 + 定时热替换
+    let filter = Arc::new(crate::filter::Filter::new(&config.adblock.allowlist));
+    if !config.adblock.rule_sources.is_empty() {
+        let rules = crate::filter::load_sources(&config.adblock.rule_sources, &bootstrap).await;
+        filter.store(rules);
+        crate::filter::spawn_updater(
+            filter.clone(),
+            config.adblock.rule_sources.clone(),
+            bootstrap.clone(),
+        );
+    }
+
+    let hosts = crate::hosts::HostsMap::from_entries(&config.hosts);
+    let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
+    let ecs = crate::ecs::subnet_from_config(&config.ecs).await;
+
     let primary = build_group(&config.upstream, config, &bootstrap).await?;
     let resolver: Arc<dyn Resolver> = if config.fallback.is_empty() {
         primary
@@ -32,7 +50,15 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
         let fb = build_group(&config.fallback, config, &bootstrap).await?;
         Arc::new(FallbackResolver::new(primary, fb))
     };
-    Ok(Arc::new(Pipeline::new(resolver)))
+
+    Ok(Arc::new(Pipeline::new(crate::pipeline::PipelineParts {
+        hosts,
+        filter,
+        cache,
+        upstream: resolver,
+        ecs,
+        query_timeout: std::time::Duration::from_secs(config.server.query_timeout_secs),
+    })))
 }
 
 async fn build_group(

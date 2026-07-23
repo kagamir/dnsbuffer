@@ -1,10 +1,33 @@
 [server]
 listen = "0.0.0.0:53"
 tcp = true
+query_timeout_secs = 10
+
+[cache]
+max_entries = 10000
+
+[ecs]
+mode = "auto"            # auto | fixed | disabled
+# fixed_subnet = "203.0.113.0/24"
 
 [selector]
 window = 32
 k = 5.0
+
+[adblock]
+allowlist = ["allowed.example.com"]
+block_response = "zero"
+
+[[adblock.rule_source]]
+url = "https://example.com/easylist.txt"
+update_interval = "24h"
+
+# [[adblock.rule_source]]
+# path = "/etc/dnsbuffer/extra-rules.txt"
+
+[[hosts]]
+name = "router.local"
+addrs = ["192.168.1.1"]
 
 [[upstream]]
 type = "doh"
