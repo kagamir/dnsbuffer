@@ -6,7 +6,7 @@
 
 **Architecture:** tokio 异步单进程。核心抽象是 `Resolver` trait（`async fn resolve(&Message) -> Result<Message>`）；`server` 收 UDP 包解码成 `Message`，交给 `pipeline` 编排（本计划仅调用一个上游），编码后回包。配置一次性定义为覆盖整份 spec 的完整结构，本计划只消费其中 `server` 与 `upstream` 的明文部分。
 
-**Tech Stack:** Rust 2021 · tokio · hickory-proto（DNS 报文编解码）· serde + toml · anyhow/thiserror · async-trait · clap · tracing。
+**Tech Stack:** Rust 2024 edition（実施時接受 cargo init 默認，MSRV 1.85+）· tokio · hickory-proto（DNS 报文编解码）· serde + toml · anyhow/thiserror · async-trait · clap · tracing。
 
 ## Global Constraints
 

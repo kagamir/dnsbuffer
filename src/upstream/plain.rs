@@ -40,7 +40,7 @@ impl Resolver for PlainResolver {
             .with_context(|| format!("connecting to upstream {}", self.addr))?;
         sock.send(&bytes).await.context("sending query")?;
 
-        let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; 65535];
         let n = timeout(self.timeout, sock.recv(&mut buf))
             .await
             .with_context(|| format!("upstream {} timed out", self.addr))?

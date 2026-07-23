@@ -16,7 +16,7 @@ pub async fn run_udp(listen: SocketAddr, pipeline: Arc<Pipeline>) -> Result<()> 
     );
     tracing::info!("listening on udp {listen}");
 
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0u8; 65535];
     loop {
         let (n, peer) = sock.recv_from(&mut buf).await.context("recv_from")?;
         let data = buf[..n].to_vec();
