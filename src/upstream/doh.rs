@@ -28,11 +28,7 @@ pub struct DohResolver {
     http3: bool,
     timeout: Duration,
     h2: Mutex<Option<H2Sender>>,
-    // Task 7 接入：h3 连接状态
-    #[allow(dead_code)]
-    pub(crate) ech: Option<Vec<u8>>,
-    #[allow(dead_code)]
-    pub(crate) extra_roots: Vec<CertificateDer<'static>>,
+    h3: Option<crate::upstream::doh3::H3Conn>,
 }
 
 impl DohResolver {
@@ -65,6 +61,17 @@ impl DohResolver {
             bail!("DoH resolver for {host} constructed without ips (bootstrap it first)");
         }
         let tls_h2 = Arc::new(crate::tls::client_config(&[b"h2"], extra_roots, ech.as_deref())?);
+        let h3 = if http3 {
+            let tls_h3 = crate::tls::client_config(&[b"h3"], extra_roots, ech.as_deref())?;
+            Some(crate::upstream::doh3::H3Conn::new(
+                host.clone(),
+                port,
+                ips.clone(),
+                tls_h3,
+            )?)
+        } else {
+            None
+        };
         Ok(Self {
             host,
             port,
@@ -74,9 +81,14 @@ impl DohResolver {
             http3,
             timeout: Duration::from_secs(5),
             h2: Mutex::new(None),
-            ech,
-            extra_roots: extra_roots.to_vec(),
+            h3,
         })
+    }
+
+    /// 测试专用：缩短超时以避免 QUIC 连接到无人监听端口时的长等待拖慢测试。
+    #[cfg(test)]
+    fn set_timeout(&mut self, d: Duration) {
+        self.timeout = d;
     }
 
     async fn connect_h2(&self) -> Result<H2Sender> {
@@ -160,8 +172,17 @@ impl DohResolver {
         bail!("h2 retry loop exhausted")
     }
 
-    async fn resolve_h3(&self, _query: &Message) -> Result<Message> {
-        bail!("h3 support not built yet") // Task 7 替换为真实实现
+    async fn resolve_h3(&self, query: &Message) -> Result<Message> {
+        let conn = self.h3.as_ref().context("h3 not enabled")?;
+        let uri = format!("https://{}:{}{}", self.host, self.port, self.path);
+        let body = conn
+            .request(&uri, query.to_vec().context("encoding query")?)
+            .await?;
+        let msg = Message::from_vec(&body).context("decoding h3 response")?;
+        if msg.metadata.id != query.metadata.id {
+            bail!("DoH h3 response id mismatch");
+        }
+        Ok(msg)
     }
 }
 
@@ -288,19 +309,36 @@ mod tests {
     async fn h3_failure_falls_back_to_h2() {
         let (addr, root) = spawn_mock_doh_server().await;
         let url = format!("https://localhost:{}/dns-query", addr.port());
-        let resolver = DohResolver::with_extra_roots(
+        let mut resolver = DohResolver::with_extra_roots(
             &url,
             vec![addr.ip()],
             None,
-            true, // http3 开启但 mock 无 H3 端点（本 Task 阶段 stub 必 Err）→ 必须回退 H2 成功
+            true, // http3 开启但 mock 无 H3 端点：真实 QUIC 连接会失败/超时 → 必须回退 H2 成功
             &[root],
         )
         .unwrap();
+        // mock 服务器只监听 TCP，没有 UDP 端点：QUIC 连接会一直等到 idle timeout 才失败。
+        // 缩短超时，让 h3 分支尽快让位给 h2 回退，避免测试变慢。
+        resolver.set_timeout(Duration::from_millis(300));
         let resp = resolver
             .resolve(&sample_query())
             .await
             .expect("h3->h2 fallback");
         assert_eq!(resp.metadata.id, 0x6161);
+    }
+
+    #[tokio::test]
+    async fn resolves_over_h3_when_available() {
+        let (addr, root) = crate::upstream::doh3::tests::spawn_mock_h3_server().await;
+        let url = format!("https://localhost:{}/dns-query", addr.port());
+        let resolver =
+            DohResolver::with_extra_roots(&url, vec![addr.ip()], None, true, &[root]).unwrap();
+        let resp = resolver
+            .resolve(&sample_query())
+            .await
+            .expect("doh h3 resolve");
+        assert_eq!(resp.metadata.id, 0x6161);
+        assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }
 
     #[tokio::test]
