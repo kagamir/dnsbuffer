@@ -67,4 +67,29 @@ mod tests {
         }
         assert!(counts[1] > counts[0] * 5, "9:1 权重应显著偏向索引 1: {counts:?}");
     }
+
+    #[test]
+    fn skips_nonfinite_and_negative_weights() {
+        // NaN、负数、无穷都应被跳过：只有索引 1、3 是有效正权重
+        let w = [f64::NAN, 1.0, -5.0, 3.0, f64::INFINITY];
+        assert_eq!(pick_weighted(&w, 0.10), Some(1)); // 0.10*4=0.4 < 1.0
+        assert_eq!(pick_weighted(&w, 0.30), Some(3)); // 0.30*4=1.2 ≥ 1.0
+        assert_eq!(pick_weighted(&w, 0.99), Some(3));
+    }
+
+    #[test]
+    fn single_negative_weight_degrades_to_uniform() {
+        assert_eq!(pick_weighted(&[-5.0], 0.5), Some(0));
+    }
+
+    #[test]
+    fn extreme_roll_hits_last_positive_fallback_safely() {
+        // roll 极接近 1 且权重量级悬殊，确保不 panic 且返回有效正权重索引
+        let w = [1e-300, 1e300, 0.0];
+        let idx = pick_weighted(&w, 0.999_999_999_999_999_9).unwrap();
+        assert!(idx == 0 || idx == 1, "must land on a positive-weight index: {idx}");
+        // 边界值 roll 恰好等于第一权重占比时落入下一桶（严格 < 语义）
+        let w2 = [1.0, 3.0];
+        assert_eq!(pick_weighted(&w2, 0.25), Some(1));
+    }
 }
