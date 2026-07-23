@@ -8,7 +8,7 @@
 - **ECH（Encrypted Client Hello）**：静态配置 base64 优先，缺省时经 bootstrap 从 HTTPS/SVCB 记录动态获取；均不可用时回退普通 TLS 并告警
 - **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧
 - **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选
-- **Bootstrap DNS**：支持 IP / DoH / DoT 形态；非 IP 形态必须显式注明域名对应 IP（避免鸡生蛋）
+- **Bootstrap DNS**：支持 IP / DoH / DoT 形态；非 IP 形态必须显式注明域名对应 IP
 - **后备 DNS**：主上游组全部失败或超时后自动接管（IP / DoH / DoT）
 - **乐观缓存**：纯内存 LRU（hashlink 链式哈希表）——命中即回（过期也返回），过期命中触发后台异步刷新，超限逐出最久未用；只缓存 NoError
 - **自定义 hosts**：精确匹配 + `*.` 通配，直接本地应答
@@ -36,7 +36,6 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 
 - 配置路径默认 `config.toml`（`-c` / `--config` 指定）
 - 日志级别用 `RUST_LOG` 控制（默认 `info`），如 `RUST_LOG=debug dnsbuffer ...`
-- 前台运行，不自带守护进程化——交给 systemd 等外部工具（见下文）
 
 ## 配置
 
@@ -177,7 +176,6 @@ src/
 
 ## 已知限制
 
-- **仅 UDP 服务端**：不监听 TCP，无 TC-bit 截断回退（上游方向的 TCP/TLS/QUIC 不受影响）
 - 缓存不落盘，重启即空
 - 规则远程源拉取失败时保留上一次成功规则集；首次即失败则该源为空，等下个周期
 - 过期热点键在上游持续故障时的后台刷新无去重（自愈型，上游恢复即停止）
