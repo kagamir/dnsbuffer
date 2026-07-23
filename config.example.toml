@@ -32,7 +32,7 @@ addrs = ["192.168.1.1"]
 [[upstream]]
 type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
-http3 = true
+http3 = true             # 默认 http/2；显式设 true 才启用 http/3（H3 优先、失败回退 H2）
 # ech = ""            # 可选：静态 base64 ECHConfigList；留空则经 bootstrap HTTPS 记录动态获取
 
 [[upstream]]

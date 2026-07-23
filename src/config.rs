@@ -24,10 +24,6 @@ pub struct Config {
     pub selector: SelectorConfig,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_query_timeout_ms() -> u64 {
     10_000
 }
@@ -142,7 +138,8 @@ pub enum UpstreamConfig {
         url: String,
         #[serde(default)]
         ech: String,
-        #[serde(default = "default_true")]
+        /// 默认 HTTP/2；显式 http3 = true 才启用 HTTP/3（H3 优先、失败回退 H2）。
+        #[serde(default)]
         http3: bool,
         #[serde(default)]
         ips: Vec<IpAddr>,
@@ -237,7 +234,7 @@ mod tests {
             UpstreamConfig::Doh { url, ech, http3, ips } => {
                 assert_eq!(url, "https://dns.example/dns-query");
                 assert!(ech.is_empty());
-                assert!(*http3, "http3 defaults to true (H3-first design)");
+                assert!(!*http3, "http3 defaults to false (opt-in via http3 = true)");
                 assert!(ips.is_empty());
             }
             _ => panic!("expected doh upstream"),

@@ -77,7 +77,7 @@ addrs = ["192.168.1.1", "fd00::1"]
 [[upstream]]
 type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
-http3 = true                 # 默认 true：H3 优先、H2 回退
+http3 = true                 # 默认 http/2；显式 true 才启用 H3（H3 优先、失败回退 H2）
 # ech = "base64..."          # 可选：静态 ECHConfigList；留空自动经 HTTPS 记录获取
 # ips = ["104.16.248.249"]   # 可选：显式 IP；留空经 bootstrap 解析域名
 

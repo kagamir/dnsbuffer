@@ -26,9 +26,10 @@ impl Bootstrap {
                     let tls = Arc::new(crate::tls::client_config(&[], &[], None)?);
                     Arc::new(DotResolver::new(*addr, domain, tls)?)
                 }
-                UpstreamConfig::Doh { url, ips, .. } => {
-                    // bootstrap 场景简化：H2、无 ECH（validate 已保证 ips 非空）
-                    Arc::new(DohResolver::new(url, ips.clone(), None, false)?)
+                UpstreamConfig::Doh { url, ips, http3, .. } => {
+                    // bootstrap 无 ECH（validate 已保证 ips 非空）；
+                    // 默认 H2，配置显式 http3 = true 才启用 H3
+                    Arc::new(DohResolver::new(url, ips.clone(), None, *http3)?)
                 }
             };
             resolvers.push(r);
