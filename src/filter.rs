@@ -349,7 +349,7 @@ plain-blocked.dev
                 update_interval: None,
             },
         ];
-        let bootstrap = crate::bootstrap::Bootstrap::from_config(&[]).unwrap();
+        let bootstrap = crate::bootstrap::Bootstrap::from_config(&[], false).unwrap();
         let rules = load_sources(&sources, &bootstrap).await;
         let f = Filter::new(&[]);
         f.store(rules);

@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **DoH 上游**：HTTP/3（QUIC）优先，失败运行时回退 HTTP/2；连接复用、多路复用；`ips` 支持 IPv4/IPv6 混填，连接时 IPv6 优先（bootstrap 解析结果同样 v6 优先）
+- **DoH 上游**：HTTP/3（QUIC）优先，失败运行时回退 HTTP/2；连接复用、多路复用；`ips` 支持 IPv4/IPv6 混填，拨号地址族偏好可配（`prefer_ipv6`，默认 IPv4 优先），bootstrap 解析结果同序
 - **ECH（Encrypted Client Hello）**：静态配置 base64 优先，缺省时经 bootstrap 从 HTTPS/SVCB 记录动态获取；均不可用时回退普通 TLS 并告警
 - **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧
 - **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选
@@ -45,6 +45,7 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 [server]
 listen = "0.0.0.0:53"        # 监听地址（仅 UDP）
 query_timeout_ms = 10000     # 单查询总超时（毫秒），包裹上游+后备整链
+prefer_ipv6 = false          # 拨号上游的地址族偏好；true 则 IPv6 优先（默认 IPv4 优先）
 
 [cache]
 max_entries = 10000          # LRU 缓存最大条数
@@ -79,7 +80,7 @@ type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
 http3 = true                 # 默认 http/2；显式 true 才启用 H3（H3 优先、失败回退 H2）
 # ech = "base64..."          # 可选：静态 ECHConfigList；留空自动经 HTTPS 记录获取
-# ips = ["2606:4700::6810:f8f9", "104.16.248.249"]  # 可选：v4/v6 混填皆可，连接时 IPv6 优先；留空经 bootstrap 解析域名
+# ips = ["2606:4700::6810:f8f9", "104.16.248.249"]  # 可选：v4/v6 混填皆可，次序按 prefer_ipv6 整理；留空经 bootstrap 解析域名
 
 [[upstream]]
 type = "dot"

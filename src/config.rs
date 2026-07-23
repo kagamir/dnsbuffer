@@ -41,6 +41,9 @@ pub struct ServerConfig {
     /// 主上游阶段预算（毫秒）：失败或超过此时限即切换 fallback 兜底。
     #[serde(default = "default_upstream_timeout_ms")]
     pub upstream_timeout_ms: u64,
+    /// 拨号上游时的地址族偏好：true 则 IPv6 优先；默认 false（IPv4 优先）。
+    #[serde(default)]
+    pub prefer_ipv6: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -309,5 +312,23 @@ mod tests {
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
         assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
+    }
+
+    #[test]
+    fn prefer_ipv6_defaults_false_and_is_opt_in() {
+        let base = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            {extra}
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(&base.replace("{extra}", "")).expect("parse");
+        assert!(!cfg.server.prefer_ipv6, "defaults to IPv4-first dialing");
+        let cfg: Config =
+            toml::from_str(&base.replace("{extra}", "prefer_ipv6 = true")).expect("parse");
+        assert!(cfg.server.prefer_ipv6);
     }
 }

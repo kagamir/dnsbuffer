@@ -25,7 +25,10 @@ use crate::upstream::group::{FallbackResolver, UpstreamGroup};
 /// 依据配置构建完整解析链：bootstrap → filter → hosts → cache → ECS → 上游组
 /// →（可选）后备组 → Pipeline 装配。
 pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
-    let bootstrap = Arc::new(Bootstrap::from_config(&config.bootstrap.servers)?);
+    let bootstrap = Arc::new(Bootstrap::from_config(
+        &config.bootstrap.servers,
+        config.server.prefer_ipv6,
+    )?);
 
     // 广告屏蔽：初次加载 + 定时热替换
     let filter = Arc::new(crate::filter::Filter::new(&config.adblock.allowlist));
@@ -72,7 +75,7 @@ async fn build_group(
 ) -> Result<Arc<dyn Resolver>> {
     let mut members: Vec<(String, Arc<dyn Resolver>)> = Vec::new();
     for u in entries {
-        members.push(build_member(u, bootstrap).await?);
+        members.push(build_member(u, bootstrap, config.server.prefer_ipv6).await?);
     }
     if members.is_empty() {
         anyhow::bail!("no upstreams configured");
@@ -83,6 +86,7 @@ async fn build_group(
 async fn build_member(
     u: &UpstreamConfig,
     bootstrap: &Bootstrap,
+    prefer_ipv6: bool,
 ) -> Result<(String, Arc<dyn Resolver>)> {
     use crate::upstream::{doh::DohResolver, dot::DotResolver, plain::PlainResolver};
     match u {
@@ -127,7 +131,10 @@ async fn build_member(
             if ech_bytes.is_none() {
                 tracing::warn!("DoH upstream {host}: no ECH config available, SNI is visible");
             }
-            Ok((format!("doh:{host}"), Arc::new(DohResolver::new(url, ips, ech_bytes, *http3)?)))
+            Ok((
+                format!("doh:{host}"),
+                Arc::new(DohResolver::new(url, ips, ech_bytes, *http3, prefer_ipv6)?),
+            ))
         }
     }
 }

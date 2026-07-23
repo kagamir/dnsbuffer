@@ -14,10 +14,12 @@ use crate::upstream::{doh::DohResolver, dot::DotResolver, plain::PlainResolver};
 /// 非 IP 形态的 bootstrap 服务器必须自带显式 ips（config.validate 已保证）。
 pub struct Bootstrap {
     resolvers: Vec<Arc<dyn Resolver>>,
+    /// 解析出的 IP 列表按此偏好排序（false = IPv4 优先，默认）。
+    prefer_ipv6: bool,
 }
 
 impl Bootstrap {
-    pub fn from_config(servers: &[UpstreamConfig]) -> Result<Self> {
+    pub fn from_config(servers: &[UpstreamConfig], prefer_ipv6: bool) -> Result<Self> {
         let mut resolvers: Vec<Arc<dyn Resolver>> = Vec::new();
         for s in servers {
             let r: Arc<dyn Resolver> = match s {
@@ -29,12 +31,12 @@ impl Bootstrap {
                 UpstreamConfig::Doh { url, ips, http3, .. } => {
                     // bootstrap 无 ECH（validate 已保证 ips 非空）；
                     // 默认 H2，配置显式 http3 = true 才启用 H3
-                    Arc::new(DohResolver::new(url, ips.clone(), None, *http3)?)
+                    Arc::new(DohResolver::new(url, ips.clone(), None, *http3, prefer_ipv6)?)
                 }
             };
             resolvers.push(r);
         }
-        Ok(Self { resolvers })
+        Ok(Self { resolvers, prefer_ipv6 })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -91,9 +93,9 @@ impl Bootstrap {
         if ips.is_empty() {
             bail!("bootstrap could not resolve any ip for {domain}");
         }
-        // BTreeSet 的 IpAddr 序是 v4 < v6，翻转为 v6 优先供拨号使用
+        // 按配置的地址族偏好排序供拨号使用（BTreeSet 序固定 v4 < v6，不可直接依赖）
         let mut ips: Vec<IpAddr> = ips.into_iter().collect();
-        crate::upstream::sort_v6_first(&mut ips);
+        crate::upstream::sort_by_family(&mut ips, self.prefer_ipv6);
         Ok(ips)
     }
 
@@ -165,31 +167,41 @@ mod tests {
         addr
     }
 
-    fn bootstrap_for(addr: SocketAddr) -> Bootstrap {
-        Bootstrap::from_config(&[crate::config::UpstreamConfig::Plain { addr }]).unwrap()
+    fn bootstrap_for(addr: SocketAddr, prefer_ipv6: bool) -> Bootstrap {
+        Bootstrap::from_config(&[crate::config::UpstreamConfig::Plain { addr }], prefer_ipv6)
+            .unwrap()
     }
 
     #[tokio::test]
-    async fn resolves_a_and_aaaa() {
+    async fn resolves_a_and_aaaa_v4_first_by_default() {
         let addr = spawn_mock_bootstrap_upstream(vec![1, 2, 3]).await;
-        let b = bootstrap_for(addr);
+        let b = bootstrap_for(addr, false);
         let ips = b.resolve_ips("dns.example").await.expect("ips");
         assert!(ips.contains(&IpAddr::from_str("93.184.216.34").unwrap()));
         assert!(ips.iter().any(|ip| ip.is_ipv6()));
-        assert!(ips[0].is_ipv6(), "resolved list must put IPv6 first for v6-preferred dialing");
+        assert!(ips[0].is_ipv4(), "default puts IPv4 first for dialing");
+    }
+
+    #[tokio::test]
+    async fn resolve_ips_puts_v6_first_when_preferred() {
+        let addr = spawn_mock_bootstrap_upstream(vec![1, 2, 3]).await;
+        let b = bootstrap_for(addr, true);
+        let ips = b.resolve_ips("dns.example").await.expect("ips");
+        assert!(ips[0].is_ipv6(), "prefer_ipv6 puts IPv6 first for dialing");
+        assert!(ips.iter().any(|ip| ip.is_ipv4()), "v4 still present as fallback");
     }
 
     #[tokio::test]
     async fn fetches_ech_from_https_record() {
         let addr = spawn_mock_bootstrap_upstream(vec![0xAB, 0xCD]).await;
-        let b = bootstrap_for(addr);
+        let b = bootstrap_for(addr, false);
         let ech = b.fetch_ech("dns.example").await.expect("ech query");
         assert_eq!(ech, Some(vec![0xAB, 0xCD]));
     }
 
     #[test]
     fn is_empty_reflects_resolver_count() {
-        let b = Bootstrap::from_config(&[]).unwrap();
+        let b = Bootstrap::from_config(&[], false).unwrap();
         assert!(b.is_empty());
     }
 }

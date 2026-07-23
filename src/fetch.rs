@@ -160,7 +160,7 @@ pub(crate) mod tests {
     }
 
     fn empty_bootstrap() -> Bootstrap {
-        Bootstrap::from_config(&[]).unwrap()
+        Bootstrap::from_config(&[], false).unwrap()
     }
 
     #[tokio::test]

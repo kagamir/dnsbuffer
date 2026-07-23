@@ -32,8 +32,14 @@ pub struct DohResolver {
 }
 
 impl DohResolver {
-    pub fn new(url: &str, ips: Vec<IpAddr>, ech: Option<Vec<u8>>, http3: bool) -> Result<Self> {
-        Self::with_extra_roots(url, ips, ech, http3, &[])
+    pub fn new(
+        url: &str,
+        ips: Vec<IpAddr>,
+        ech: Option<Vec<u8>>,
+        http3: bool,
+        prefer_ipv6: bool,
+    ) -> Result<Self> {
+        Self::with_extra_roots(url, ips, ech, http3, prefer_ipv6, &[])
     }
 
     pub fn with_extra_roots(
@@ -41,6 +47,7 @@ impl DohResolver {
         ips: Vec<IpAddr>,
         ech: Option<Vec<u8>>,
         http3: bool,
+        prefer_ipv6: bool,
         extra_roots: &[CertificateDer<'static>],
     ) -> Result<Self> {
         let uri: http::Uri = url
@@ -61,7 +68,7 @@ impl DohResolver {
             bail!("DoH resolver for {host} constructed without ips (bootstrap it first)");
         }
         let mut ips = ips;
-        crate::upstream::sort_v6_first(&mut ips);
+        crate::upstream::sort_by_family(&mut ips, prefer_ipv6);
         let tls_h2 = Arc::new(crate::tls::client_config(&[b"h2"], extra_roots, ech.as_deref())?);
         let h3 = if http3 {
             let tls_h3 = crate::tls::client_config(&[b"h3"], extra_roots, ech.as_deref())?;
@@ -314,6 +321,7 @@ mod tests {
             vec![addr.ip()],
             None,
             false, // 本测试仅 H2
+            false,
             &[root],
         )
         .unwrap();
@@ -325,25 +333,31 @@ mod tests {
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }
 
-    #[tokio::test]
-    async fn prefers_ipv6_when_both_families_configured() {
-        use hickory_proto::rr::rdata::AAAA;
-        use hickory_proto::rr::RData;
-        // v4 与 v6 两台 mock 用同一端口号（先绑 v4 拿端口，再绑 [::1] 同端口），
-        // 各自应答带本机族标记记录，据此判断实际连到了哪台。
+    /// v4 与 v6 两台 mock 用同一端口号（先绑 v4 拿端口，再绑 [::1] 同端口），
+    /// 各自应答带本机族标记记录，据此判断实际连到了哪台。
+    async fn spawn_dual_family_servers() -> (u16, Vec<CertificateDer<'static>>) {
         let (addr4, root4) =
             spawn_mock_doh_server_at("127.0.0.1:0", Some("1.2.3.4".parse().unwrap())).await;
         let bind6 = format!("[::1]:{}", addr4.port());
         let (_addr6, root6) =
             spawn_mock_doh_server_at(&bind6, Some("2001:db8::42".parse().unwrap())).await;
-        let url = format!("https://localhost:{}/dns-query", addr4.port());
-        // 配置顺序故意 v4 在前：解析器仍必须先连 IPv6
+        (addr4.port(), vec![root4, root6])
+    }
+
+    #[tokio::test]
+    async fn prefers_ipv6_when_configured() {
+        use hickory_proto::rr::rdata::AAAA;
+        use hickory_proto::rr::RData;
+        let (port, roots) = spawn_dual_family_servers().await;
+        let url = format!("https://localhost:{port}/dns-query");
+        // 配置顺序故意 v4 在前：prefer_ipv6 = true 时仍必须先连 IPv6
         let resolver = DohResolver::with_extra_roots(
             &url,
-            vec![addr4.ip(), "::1".parse().unwrap()],
+            vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
             None,
             false,
-            &[root4, root6],
+            true,
+            &roots,
         )
         .unwrap();
         let resp = resolver.resolve(&sample_query()).await.expect("resolve");
@@ -351,6 +365,30 @@ mod tests {
             resp.answers[0].data,
             RData::AAAA(AAAA("2001:db8::42".parse().unwrap())),
             "must have connected to the IPv6 server first"
+        );
+    }
+
+    #[tokio::test]
+    async fn prefers_ipv4_by_default() {
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::RData;
+        let (port, roots) = spawn_dual_family_servers().await;
+        let url = format!("https://localhost:{port}/dns-query");
+        // 配置顺序故意 v6 在前：默认（prefer_ipv6 = false）必须先连 IPv4
+        let resolver = DohResolver::with_extra_roots(
+            &url,
+            vec!["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()],
+            None,
+            false,
+            false,
+            &roots,
+        )
+        .unwrap();
+        let resp = resolver.resolve(&sample_query()).await.expect("resolve");
+        assert_eq!(
+            resp.answers[0].data,
+            RData::A(A("1.2.3.4".parse().unwrap())),
+            "must have connected to the IPv4 server first"
         );
     }
 
@@ -363,6 +401,7 @@ mod tests {
             vec![addr.ip()],
             None,
             true, // http3 开启但 mock 无 H3 端点：真实 QUIC 连接会失败/超时 → 必须回退 H2 成功
+            false,
             &[root],
         )
         .unwrap();
@@ -381,7 +420,8 @@ mod tests {
         let (addr, root) = crate::upstream::doh3::tests::spawn_mock_h3_server().await;
         let url = format!("https://localhost:{}/dns-query", addr.port());
         let resolver =
-            DohResolver::with_extra_roots(&url, vec![addr.ip()], None, true, &[root]).unwrap();
+            DohResolver::with_extra_roots(&url, vec![addr.ip()], None, true, false, &[root])
+                .unwrap();
         let resp = resolver
             .resolve(&sample_query())
             .await
@@ -395,7 +435,8 @@ mod tests {
         let (addr, root) = spawn_mock_doh_server().await;
         let url = format!("https://localhost:{}", addr.port()); // 无 path
         let resolver =
-            DohResolver::with_extra_roots(&url, vec![addr.ip()], None, false, &[root]).unwrap();
+            DohResolver::with_extra_roots(&url, vec![addr.ip()], None, false, false, &[root])
+                .unwrap();
         let resp = resolver
             .resolve(&sample_query())
             .await
