@@ -1,7 +1,17 @@
-use anyhow::Result;
+use std::path::PathBuf;
 
-mod config;
-mod resolver;
+use anyhow::Result;
+use clap::Parser;
+
+use dnsbuffer::{build_pipeline, config, server};
+
+#[derive(Parser, Debug)]
+#[command(name = "dnsbuffer", about = "A DNS proxy with DoH/ECH upstreams")]
+struct Args {
+    /// 配置文件路径
+    #[arg(short, long, default_value = "config.toml")]
+    config: PathBuf,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -11,6 +21,10 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    let args = Args::parse();
+    let cfg = config::load(&args.config)?;
+    let pipeline = build_pipeline(&cfg)?;
     tracing::info!("dnsbuffer starting");
-    Ok(())
+    server::run_udp(cfg.server.listen, pipeline).await
 }
