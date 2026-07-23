@@ -4,7 +4,7 @@
 
 ## 特性
 
-- **DoH 上游**：严格按配置选协议——默认 HTTP/2，`http3 = true` 则仅用 HTTP/3（QUIC），不做协议降级；连接复用、多路复用；可用 `ip` 指定单个服务器 IP（v4/v6 皆可），留空经 bootstrap 解析，解析结果按拨号地址族偏好排序（`prefer_ipv6`，默认 IPv4 优先）
+- **DoH 上游**：严格按配置选协议——默认 HTTP/2，`http3 = true` 则仅用 HTTP/3（QUIC），不做协议降级；连接复用、多路复用；长连接保活（H2 ping / QUIC keep-alive 15s），复用前检查连接死活、失败自动重连再试，长时间放置后首个请求不再死等超时；可用 `ip` 指定单个服务器 IP（v4/v6 皆可），留空经 bootstrap 解析，解析结果按拨号地址族偏好排序（`prefer_ipv6`，默认 IPv4 优先）
 - **ECH（Encrypted Client Hello）**：静态配置 base64 优先，缺省时经 bootstrap 从 HTTPS/SVCB 记录动态获取；均不可用时回退普通 TLS 并告警
 - **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧；`ip` 指定服务器 IP，端口写在 `domain` 中（默认 853）
 - **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选

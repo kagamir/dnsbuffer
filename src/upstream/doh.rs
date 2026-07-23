@@ -112,12 +112,17 @@ impl DohResolver {
                         .connect(server_name, tcp)
                         .await
                         .context("DoH TLS handshake")?;
-                    let (sender, conn) = hyper::client::conn::http2::handshake(
-                        TokioExecutor::new(),
-                        TokioIo::new(tls),
-                    )
-                    .await
-                    .context("h2 handshake")?;
+                    // ping 保活：防 NAT 映射过期；空闲死链在 keep_alive_timeout 内
+                    // 被判死，send_request 立即失败并走上面的重连重试
+                    let (sender, conn) =
+                        hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                            .timer(hyper_util::rt::TokioTimer::new())
+                            .keep_alive_interval(Duration::from_secs(15))
+                            .keep_alive_timeout(Duration::from_secs(5))
+                            .keep_alive_while_idle(true)
+                            .handshake(TokioIo::new(tls))
+                            .await
+                            .context("h2 handshake")?;
                     tokio::spawn(async move {
                         if let Err(e) = conn.await {
                             tracing::debug!("h2 connection closed: {e}");
