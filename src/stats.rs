@@ -53,8 +53,9 @@ impl UpstreamStats {
         }
     }
 
-    /// w = 1 / ((t_avg_ms + ε) × (1 + k·f))，ε=1.0
+    /// w = 1 / ((t_avg_ms + ε) × (1 + k·f))，ε=1.0；k 负值按 0 处理
     pub fn weight(&self, k: f64) -> f64 {
+        let k = k.max(0.0);
         1.0 / ((self.avg_latency_ms() + 1.0) * (1.0 + k * self.failure_rate()))
     }
 }
@@ -110,5 +111,16 @@ mod tests {
             s.record_success(Duration::from_millis(10));
         }
         assert_eq!(s.failure_rate(), 0.0, "old failures evicted from window");
+    }
+
+    #[test]
+    fn negative_k_treated_as_zero() {
+        let mut s = UpstreamStats::new(4);
+        for _ in 0..4 {
+            s.record_failure();
+        }
+        let w = s.weight(-2.0);
+        assert!(w.is_finite() && w > 0.0, "negative k must not produce inf/negative weight: {w}");
+        assert!((w - s.weight(0.0)).abs() < 1e-12);
     }
 }
