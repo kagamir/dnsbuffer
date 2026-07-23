@@ -91,7 +91,10 @@ impl Bootstrap {
         if ips.is_empty() {
             bail!("bootstrap could not resolve any ip for {domain}");
         }
-        Ok(ips.into_iter().collect())
+        // BTreeSet 的 IpAddr 序是 v4 < v6，翻转为 v6 优先供拨号使用
+        let mut ips: Vec<IpAddr> = ips.into_iter().collect();
+        crate::upstream::sort_v6_first(&mut ips);
+        Ok(ips)
     }
 
     pub async fn fetch_ech(&self, domain: &str) -> Result<Option<Vec<u8>>> {
@@ -173,6 +176,7 @@ mod tests {
         let ips = b.resolve_ips("dns.example").await.expect("ips");
         assert!(ips.contains(&IpAddr::from_str("93.184.216.34").unwrap()));
         assert!(ips.iter().any(|ip| ip.is_ipv6()));
+        assert!(ips[0].is_ipv6(), "resolved list must put IPv6 first for v6-preferred dialing");
     }
 
     #[tokio::test]

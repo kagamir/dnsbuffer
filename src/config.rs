@@ -242,6 +242,28 @@ mod tests {
     }
 
     #[test]
+    fn ips_accept_ipv6_literals() {
+        let toml = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+
+            [[upstream]]
+            type = "doh"
+            url = "https://dns.example/dns-query"
+            ips = ["2606:4700::6810:f8f9", "104.16.248.249"]
+        "#;
+        let cfg: Config = toml::from_str(toml).expect("parse");
+        match &cfg.upstream[0] {
+            UpstreamConfig::Doh { ips, .. } => {
+                assert_eq!(ips.len(), 2);
+                assert!(ips[0].is_ipv6(), "ipv6 literal parses");
+                assert!(ips[1].is_ipv4());
+            }
+            _ => panic!("expected doh upstream"),
+        }
+    }
+
+    #[test]
     fn selector_defaults() {
         let toml = r#"
             [server]

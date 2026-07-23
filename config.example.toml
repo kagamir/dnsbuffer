@@ -34,6 +34,7 @@ type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
 http3 = true             # 默认 http/2；显式设 true 才启用 http/3（H3 优先、失败回退 H2）
 # ech = ""            # 可选：静态 base64 ECHConfigList；留空则经 bootstrap HTTPS 记录动态获取
+# ips = ["2606:4700::6810:f8f9", "104.16.248.249"]  # 可选：v4/v6 混填皆可，连接时 IPv6 优先；留空经 bootstrap 解析
 
 [[upstream]]
 type = "dot"

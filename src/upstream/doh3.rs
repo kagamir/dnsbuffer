@@ -24,12 +24,18 @@ impl H3Conn {
         let quic = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
             .context("building QUIC client config (provider must support QUIC)")?;
         let client_config = quinn::ClientConfig::new(Arc::new(quic));
-        let bind: SocketAddr = if ips.iter().all(|ip| ip.is_ipv6()) {
-            "[::]:0".parse().expect("static addr")
+        // 列表含任意 v6 就绑 [::]（quinn 会把 v4 目标映射为 v6-mapped 一并可达）；
+        // 纯 v4 或本机无 v6 栈时退回 0.0.0.0（此时 v6 目标逐个失败，由重选/H2 兜底）。
+        let v4_bind: SocketAddr = "0.0.0.0:0".parse().expect("static addr");
+        let mut endpoint = if ips.iter().any(|ip| ip.is_ipv6()) {
+            quinn::Endpoint::client("[::]:0".parse().expect("static addr")).or_else(|e| {
+                tracing::warn!("binding [::] for QUIC failed ({e}), falling back to IPv4-only");
+                quinn::Endpoint::client(v4_bind)
+            })
         } else {
-            "0.0.0.0:0".parse().expect("static addr")
-        };
-        let mut endpoint = quinn::Endpoint::client(bind).context("creating QUIC endpoint")?;
+            quinn::Endpoint::client(v4_bind)
+        }
+        .context("creating QUIC endpoint")?;
         endpoint.set_default_client_config(client_config);
         Ok(Self {
             host,
@@ -129,6 +135,10 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     pub(crate) async fn spawn_mock_h3_server() -> (SocketAddr, CertificateDer<'static>) {
+        spawn_mock_h3_server_at("127.0.0.1:0").await
+    }
+
+    pub(crate) async fn spawn_mock_h3_server_at(bind: &str) -> (SocketAddr, CertificateDer<'static>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
         let key_der = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
@@ -147,7 +157,7 @@ pub(crate) mod tests {
             quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
         ));
         let endpoint =
-            quinn::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+            quinn::Endpoint::server(server_config, bind.parse().unwrap()).unwrap();
         let addr = endpoint.local_addr().unwrap();
 
         tokio::spawn(async move {
@@ -198,6 +208,28 @@ pub(crate) mod tests {
         q.set_query_type(RecordType::A);
         m.add_query(q);
         m
+    }
+
+    #[tokio::test]
+    async fn h3_mixed_family_ips_reach_ipv6_server() {
+        // 服务器只在 [::1] 上监听；ips 混合 v6+v4。
+        // endpoint 必须绑 [::]（而非 0.0.0.0），否则拨 v6 直接 InvalidRemoteAddress。
+        let (addr, root) = spawn_mock_h3_server_at("[::1]:0").await;
+        let tls = crate::tls::client_config(&[b"h3"], &[root], None).unwrap();
+        let conn = H3Conn::new(
+            "localhost".into(),
+            addr.port(),
+            vec!["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()],
+            tls,
+        )
+        .unwrap();
+        let uri = format!("https://localhost:{}/dns-query", addr.port());
+        let body = conn
+            .request(&uri, sample_query().to_vec().unwrap())
+            .await
+            .expect("h3 request over ipv6 with mixed ip list");
+        let resp = Message::from_vec(&body).unwrap();
+        assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }
 
     #[tokio::test]

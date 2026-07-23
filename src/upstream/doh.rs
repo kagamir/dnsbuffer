@@ -60,6 +60,8 @@ impl DohResolver {
         if ips.is_empty() {
             bail!("DoH resolver for {host} constructed without ips (bootstrap it first)");
         }
+        let mut ips = ips;
+        crate::upstream::sort_v6_first(&mut ips);
         let tls_h2 = Arc::new(crate::tls::client_config(&[b"h2"], extra_roots, ech.as_deref())?);
         let h3 = if http3 {
             let tls_h3 = crate::tls::client_config(&[b"h3"], extra_roots, ech.as_deref())?;
@@ -223,6 +225,14 @@ mod tests {
 
     /// 起一个 HTTPS(H2) mock DoH server：对 POST /dns-query 回 NoError 响应。
     async fn spawn_mock_doh_server() -> (SocketAddr, CertificateDer<'static>) {
+        spawn_mock_doh_server_at("127.0.0.1:0", None).await
+    }
+
+    /// 同上，但可指定绑定地址与应答记录（用于区分「哪台服务器接到了请求」）。
+    async fn spawn_mock_doh_server_at(
+        bind: &str,
+        answer_ip: Option<std::net::IpAddr>,
+    ) -> (SocketAddr, CertificateDer<'static>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
         let key_der = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
@@ -238,12 +248,12 @@ mod tests {
         server_config.alpn_protocols = vec![b"h2".to_vec()];
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let tls = acceptor.accept(tcp).await.unwrap();
-            let service = service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+            let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| async move {
                 if req.method() != hyper::Method::POST || req.uri().path() != "/dns-query" {
                     return Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
@@ -259,6 +269,16 @@ mod tests {
                 resp.metadata.response_code = ResponseCode::NoError;
                 for q in &query.queries {
                     resp.add_query(q.clone());
+                }
+                if let Some(ip) = answer_ip {
+                    use hickory_proto::rr::rdata::{A, AAAA};
+                    use hickory_proto::rr::{RData, Record};
+                    let rdata = match ip {
+                        std::net::IpAddr::V4(v4) => RData::A(A(v4)),
+                        std::net::IpAddr::V6(v6) => RData::AAAA(AAAA(v6)),
+                    };
+                    let name = query.queries[0].name().clone();
+                    resp.add_answer(Record::from_rdata(name, 300, rdata));
                 }
                 Ok::<_, std::convert::Infallible>(
                     hyper::Response::builder()
@@ -303,6 +323,35 @@ mod tests {
             .expect("doh h2 resolve");
         assert_eq!(resp.metadata.id, 0x6161);
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+    }
+
+    #[tokio::test]
+    async fn prefers_ipv6_when_both_families_configured() {
+        use hickory_proto::rr::rdata::AAAA;
+        use hickory_proto::rr::RData;
+        // v4 与 v6 两台 mock 用同一端口号（先绑 v4 拿端口，再绑 [::1] 同端口），
+        // 各自应答带本机族标记记录，据此判断实际连到了哪台。
+        let (addr4, root4) =
+            spawn_mock_doh_server_at("127.0.0.1:0", Some("1.2.3.4".parse().unwrap())).await;
+        let bind6 = format!("[::1]:{}", addr4.port());
+        let (_addr6, root6) =
+            spawn_mock_doh_server_at(&bind6, Some("2001:db8::42".parse().unwrap())).await;
+        let url = format!("https://localhost:{}/dns-query", addr4.port());
+        // 配置顺序故意 v4 在前：解析器仍必须先连 IPv6
+        let resolver = DohResolver::with_extra_roots(
+            &url,
+            vec![addr4.ip(), "::1".parse().unwrap()],
+            None,
+            false,
+            &[root4, root6],
+        )
+        .unwrap();
+        let resp = resolver.resolve(&sample_query()).await.expect("resolve");
+        assert_eq!(
+            resp.answers[0].data,
+            RData::AAAA(AAAA("2001:db8::42".parse().unwrap())),
+            "must have connected to the IPv6 server first"
+        );
     }
 
     #[tokio::test]
