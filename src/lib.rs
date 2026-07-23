@@ -2,6 +2,7 @@ pub mod config;
 pub mod pipeline;
 pub mod resolver;
 pub mod server;
+pub mod stats;
 pub mod upstream;
 
 use std::sync::Arc;
