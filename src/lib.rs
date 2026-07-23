@@ -46,7 +46,15 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
     let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
     let ecs = crate::ecs::subnet_from_config(&config.ecs).await;
 
-    let primary = build_group(&config.upstream, config, &bootstrap).await?;
+    let mut primary = build_group(&config.upstream, config, &bootstrap).await?;
+    // 快速重试（对冲）：主上游尝试超过 fast_retry_ms 未返回即并行再发，0 禁用
+    if config.server.fast_retry_ms > 0 {
+        primary = Arc::new(crate::upstream::hedged::HedgedResolver::new(
+            primary,
+            std::time::Duration::from_millis(config.server.fast_retry_ms),
+            std::time::Duration::from_millis(config.server.upstream_timeout_ms),
+        ));
+    }
     let resolver: Arc<dyn Resolver> = if config.fallback.is_empty() {
         primary
     } else {
