@@ -5,6 +5,10 @@ upstream_timeout_ms = 5000       # 主上游阶段预算：失败或超时即切
 prefer_ipv6 = false              # 拨号上游的地址族偏好；true 则 IPv6 优先（默认 IPv4 优先）
 hedged_retry_ms = 1000           # 对冲式重试间隔：超时未返回即并行再发起尝试；0 禁用
 
+[log]
+level = "info"           # error | warn | info | debug | trace；RUST_LOG 环境变量优先
+                         # warn 只看启动信息与配置问题；info 额外显示请求失败/重试
+
 [cache]
 max_entries = 10000
 

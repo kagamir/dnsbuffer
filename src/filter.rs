@@ -172,7 +172,7 @@ pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> Rule
             match std::fs::read_to_string(path) {
                 Ok(t) => t,
                 Err(e) => {
-                    tracing::warn!("reading rule file {path} failed: {e}");
+                    tracing::info!("reading rule file {path} failed: {e}");
                     continue;
                 }
             }
@@ -180,11 +180,11 @@ pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> Rule
             match tokio::time::timeout(std::time::Duration::from_secs(60), crate::fetch::fetch_url(url, bootstrap)).await {
                 Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
                 Ok(Err(e)) => {
-                    tracing::warn!("fetching rules {url} failed: {e:#}");
+                    tracing::info!("fetching rules {url} failed: {e:#}");
                     continue;
                 }
                 Err(_) => {
-                    tracing::warn!("fetching rules {url} timed out");
+                    tracing::info!("fetching rules {url} timed out");
                     continue;
                 }
             }
@@ -225,7 +225,7 @@ pub fn spawn_updater(filter: Arc<Filter>, sources: Vec<RuleSource>, bootstrap: A
             let rules = load_sources(&sources, &bootstrap).await;
             let (b, _) = rules.len();
             if b == 0 {
-                tracing::warn!("periodic rule refresh yielded 0 blocked entries, keeping old set");
+                tracing::info!("periodic rule refresh yielded 0 blocked entries, keeping old set");
                 continue;
             }
             filter.store(rules);

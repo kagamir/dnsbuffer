@@ -95,7 +95,7 @@ impl Pipeline {
                 resp
             }
             Err(e) => {
-                tracing::warn!("resolve failed: {e:#}");
+                tracing::info!("resolve failed: {e:#}");
                 servfail(query)
             }
         }
@@ -123,8 +123,8 @@ impl Pipeline {
                         resp.metadata.response_code
                     );
                 }
-                Ok(Err(e)) => tracing::warn!("cache refresh failed: {e:#}"),
-                Err(_) => tracing::warn!("cache refresh timed out"),
+                Ok(Err(e)) => tracing::info!("cache refresh failed: {e:#}"),
+                Err(_) => tracing::info!("cache refresh timed out"),
             }
         });
     }

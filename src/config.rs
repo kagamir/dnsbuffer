@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
+    pub log: LogConfig,
+    #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
     pub ecs: EcsConfig,
@@ -52,6 +54,24 @@ pub struct ServerConfig {
     /// 而不取消在途的；任一返回即胜出，直到 upstream_timeout_ms 耗尽。0 表示禁用。
     #[serde(default = "default_hedged_retry_ms")]
     pub hedged_retry_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogConfig {
+    /// 日志等级：error | warn | info | debug | trace（也接受 EnvFilter 指令语法，
+    /// 如 "warn,dnsbuffer=debug"）；RUST_LOG 环境变量优先于此配置。
+    #[serde(default = "default_log_level")]
+    pub level: String,
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self { level: default_log_level() }
+    }
+}
+
+fn default_log_level() -> String {
+    "info".into()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -372,6 +392,23 @@ mod tests {
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
         assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
         assert_eq!(cfg.server.hedged_retry_ms, 1_000, "hedged retry interval defaults to 1s");
+    }
+
+    #[test]
+    fn log_level_defaults_to_info_and_is_configurable() {
+        let base = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            {extra}
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(&base.replace("{extra}", "")).expect("parse");
+        assert_eq!(cfg.log.level, "info");
+        let cfg: Config = toml::from_str(&base.replace("{extra}", "[log]\nlevel = \"warn\"\n"))
+            .expect("parse");
+        assert_eq!(cfg.log.level, "warn");
     }
 
     #[test]

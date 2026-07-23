@@ -103,7 +103,7 @@ async fn try_member(m: &Member, query: &Message) -> Result<Message> {
             if let Ok(mut s) = m.stats.lock() {
                 s.record_failure();
             }
-            tracing::warn!("upstream {} failed: {e:#}", m.name);
+            tracing::info!("upstream {} failed: {e:#}", m.name);
             Err(e)
         }
     }
@@ -133,11 +133,11 @@ impl Resolver for FallbackResolver {
         match tokio::time::timeout(self.primary_timeout, self.primary.resolve(query)).await {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(e)) => {
-                tracing::warn!("primary upstreams exhausted, using fallback: {e:#}");
+                tracing::info!("primary upstreams exhausted, using fallback: {e:#}");
                 self.fallback.resolve(query).await
             }
             Err(_) => {
-                tracing::warn!(
+                tracing::info!(
                     "primary upstreams exceeded {:?} budget, using fallback",
                     self.primary_timeout
                 );

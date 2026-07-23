@@ -14,7 +14,7 @@ pub async fn run_udp(listen: SocketAddr, pipeline: Arc<Pipeline>) -> Result<()> 
             .await
             .with_context(|| format!("binding UDP {listen}"))?,
     );
-    tracing::info!("listening on udp {listen}");
+    tracing::warn!("listening on udp {listen}");
 
     let mut buf = vec![0u8; 65535];
     loop {
@@ -24,7 +24,7 @@ pub async fn run_udp(listen: SocketAddr, pipeline: Arc<Pipeline>) -> Result<()> 
         let pipeline = pipeline.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_packet(&data, peer, &sock, &pipeline).await {
-                tracing::warn!("error handling packet from {peer}: {e:#}");
+                tracing::info!("error handling packet from {peer}: {e:#}");
             }
         });
     }

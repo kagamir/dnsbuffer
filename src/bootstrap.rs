@@ -64,7 +64,7 @@ impl Bootstrap {
             match r.resolve(&query).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
-                    tracing::warn!("bootstrap resolver failed for {domain} {rtype}: {e:#}");
+                    tracing::info!("bootstrap resolver failed for {domain} {rtype}: {e:#}");
                     last = Some(e);
                 }
             }
@@ -89,7 +89,7 @@ impl Bootstrap {
                         }
                     }
                 }
-                Err(e) => tracing::warn!("bootstrap {rtype} lookup failed for {domain}: {e:#}"),
+                Err(e) => tracing::info!("bootstrap {rtype} lookup failed for {domain}: {e:#}"),
             }
         }
         if ips.is_empty() {

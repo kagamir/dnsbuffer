@@ -128,7 +128,7 @@ async fn build_member(
                     match bootstrap.fetch_ech(&host).await {
                         Ok(e) => e,
                         Err(err) => {
-                            tracing::warn!("ECH fetch failed for {host}, using plain TLS: {err:#}");
+                            tracing::info!("ECH fetch failed for {host}, using plain TLS: {err:#}");
                             None
                         }
                     }

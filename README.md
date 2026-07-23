@@ -36,7 +36,8 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 ```
 
 - 配置路径默认 `config.toml`（`-c` / `--config` 指定）
-- 日志级别用 `RUST_LOG` 控制（默认 `info`），如 `RUST_LOG=debug dnsbuffer ...`
+- 日志级别在配置文件 `[log] level` 设置（默认 `info`）；`RUST_LOG` 环境变量优先，便于临时调试，如 `RUST_LOG=debug dnsbuffer ...`
+- 级别约定：启动信息（"dnsbuffer starting" / "listening on udp"）为 WARN，配置问题为 WARN，请求失败与重试/切换 fallback 等运行期波动为 INFO——设 `level = "warn"` 可只保留启动与配置告警
 
 ## 配置
 
@@ -48,6 +49,9 @@ listen = "0.0.0.0:53"        # 监听地址（仅 UDP）
 query_timeout_ms = 10000     # 单查询总超时（毫秒），包裹上游+后备整链
 prefer_ipv6 = false          # 拨号上游的地址族偏好；true 则 IPv6 优先（默认 IPv4 优先）
 hedged_retry_ms = 1000       # 对冲式重试间隔（毫秒）；0 禁用
+
+[log]
+level = "info"               # error | warn | info | debug | trace；RUST_LOG 环境变量优先
 
 [cache]
 max_entries = 10000          # LRU 缓存最大条数
@@ -137,7 +141,6 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 DynamicUser=true
-Environment=RUST_LOG=info
 
 [Install]
 WantedBy=multi-user.target
