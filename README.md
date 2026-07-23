@@ -39,6 +39,29 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 - 日志级别在配置文件 `[log] level` 设置（默认 `info`）；`RUST_LOG` 环境变量优先，便于临时调试，如 `RUST_LOG=debug dnsbuffer ...`
 - 级别约定：启动信息（"dnsbuffer starting" / "listening on udp"）为 WARN，配置问题为 WARN，请求失败与重试/切换 fallback 等运行期波动为 INFO——设 `level = "warn"` 可只保留启动与配置告警
 
+## Docker
+
+多架构镜像（`linux/amd64`、`linux/arm64`）随每次 GitHub Release 自动构建并推送到 GHCR：
+
+```bash
+docker pull ghcr.io/kagamir/dnsbuffer:latest
+```
+
+镜像基于 distroless（无 shell，仅含运行所需的 glibc），默认以 root 运行以便绑定 53 端口，内置一份示例配置在 `/etc/dnsbuffer/config.toml`。生产环境请挂载自己的配置覆盖它：
+
+```bash
+docker run -d --name dnsbuffer \
+  --restart unless-stopped \
+  -p 53:53/udp \
+  -v /etc/dnsbuffer/config.toml:/etc/dnsbuffer/config.toml:ro \
+  ghcr.io/kagamir/dnsbuffer:latest
+```
+
+- 配置中 `listen` 需为 `0.0.0.0:53`（容器内监听全部网卡），宿主侧用 `-p` 映射端口
+- 临时调试可加 `-e RUST_LOG=debug`
+- 若挂载了远程规则源的本地文件（`[[adblock.rule_source]] path = ...`），一并 `-v` 进容器
+- 可用标签：`latest`、`vX.Y.Z`、`X.Y`（如 `v0.1.0`、`0.1`）
+
 ## 配置
 
 完整示例见 [`config.example.toml`](config.example.toml)。所有节除 `[server]` 与 `[[upstream]]` 外均可省略。
