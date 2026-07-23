@@ -157,7 +157,7 @@ impl Config {
         for b in &self.bootstrap.servers {
             match b {
                 UpstreamConfig::Doh { ips, url, .. } if ips.is_empty() => {
-                    bail!("bootstrap doh {} must specify ips (chicken-and-egg)", url);
+                    bail!("bootstrap doh {url} must specify ips (chicken-and-egg)");
                 }
                 UpstreamConfig::Dot { ips: _, addr: _, domain: _ } => {
                     // addr is the IP, no need for ips

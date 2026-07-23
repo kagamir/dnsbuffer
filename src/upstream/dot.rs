@@ -53,6 +53,9 @@ impl DotResolver {
             .context("TLS handshake")?;
 
         let bytes = query.to_vec().context("encoding query")?;
+        if bytes.len() > u16::MAX as usize {
+            bail!("query too large for DoT framing: {} bytes", bytes.len());
+        }
         let mut out = Vec::with_capacity(2 + bytes.len());
         out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
         out.extend_from_slice(&bytes);
@@ -100,7 +103,8 @@ mod tests {
 
     /// 生成 localhost 自签证书，起一个单连接 mock DoT server，
     /// 返回 (addr, 根证书) 供客户端信任。
-    async fn spawn_mock_dot_server() -> (SocketAddr, CertificateDer<'static>) {
+    /// 若 bad_id 为 true，响应 ID 会被改为 query.id + 1。
+    async fn spawn_mock_dot_server(bad_id: bool) -> (SocketAddr, CertificateDer<'static>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
         let key_der = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
@@ -127,7 +131,12 @@ mod tests {
             tls.read_exact(&mut data).await.unwrap();
             let query = Message::from_vec(&data).unwrap();
             // mirror 仓库既有响应构造模式
-            let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+            let resp_id = if bad_id {
+                query.metadata.id.wrapping_add(1)
+            } else {
+                query.metadata.id
+            };
+            let mut resp = Message::new(resp_id, MessageType::Response, OpCode::Query);
             resp.metadata.response_code = ResponseCode::NoError;
             for q in &query.queries {
                 resp.add_query(q.clone());
@@ -153,11 +162,20 @@ mod tests {
 
     #[tokio::test]
     async fn resolves_over_tls_with_length_prefix() {
-        let (addr, root) = spawn_mock_dot_server().await;
+        let (addr, root) = spawn_mock_dot_server(false).await;
         let tls = Arc::new(crate::tls::client_config(&[], &[root], None).unwrap());
         let resolver = DotResolver::new(addr, "localhost", tls).unwrap();
         let resp = resolver.resolve(&sample_query()).await.expect("dot resolve");
         assert_eq!(resp.metadata.id, 0x5151);
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_response_id() {
+        let (addr, root) = spawn_mock_dot_server(true).await;
+        let tls = Arc::new(crate::tls::client_config(&[], &[root], None).unwrap());
+        let resolver = DotResolver::new(addr, "localhost", tls).unwrap();
+        let result = resolver.resolve(&sample_query()).await;
+        assert!(result.is_err());
     }
 }
