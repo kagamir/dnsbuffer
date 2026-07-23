@@ -57,7 +57,7 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
         cache,
         upstream: resolver,
         ecs,
-        query_timeout: std::time::Duration::from_secs(config.server.query_timeout_secs),
+        query_timeout: std::time::Duration::from_millis(config.server.query_timeout_ms),
     })))
 }
 

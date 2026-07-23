@@ -1,7 +1,7 @@
 [server]
 listen = "0.0.0.0:53"
 tcp = true               # 注意：TCP 监听/TC-bit 回退暂未实现，此开关目前无效
-query_timeout_secs = 10
+query_timeout_ms = 10000
 
 [cache]
 max_entries = 10000

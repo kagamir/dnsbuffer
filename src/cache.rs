@@ -25,8 +25,8 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
-/// 纯内存 FIFO 乐观缓存：命中即返回（过期也返回并标记）；
-/// 读取不改变队列顺序；put 删旧插队尾；超限逐出最旧。
+/// 纯内存 LRU 乐观缓存：命中即返回（过期也返回并标记）；
+/// 读取把条目刷新到队尾（最近使用）；put 删旧插队尾；超限逐出最久未用。
 pub struct Cache {
     map: Mutex<LinkedHashMap<CacheKey, CacheEntry>>,
     max_entries: usize,
@@ -38,10 +38,11 @@ impl Cache {
         Self { map: Mutex::new(LinkedHashMap::new()), max_entries: max_entries.max(1) }
     }
 
-    /// 命中时克隆报文并把 id 改写为当前查询 id。bool 表示已过期（需后台刷新）。
+    /// 命中时克隆报文并把 id 改写为当前查询 id，同时把条目刷新为最近使用（LRU）。
+    /// bool 表示已过期（需后台刷新）。
     pub fn get(&self, key: &CacheKey, query_id: u16) -> Option<(Message, bool)> {
-        let map = self.map.lock().ok()?;
-        let entry = map.get(key)?;
+        let mut map = self.map.lock().ok()?;
+        let entry = map.to_back(key)?; // LRU：命中即移到队尾
         let mut msg = entry.message.clone();
         msg.metadata.id = query_id;
         let expired = Instant::now() >= entry.expires_at;
@@ -103,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn hit_rewrites_id_and_preserves_order() {
+    fn hit_rewrites_id() {
         let cache = Cache::new(10);
         cache.put(key("example.com."), response(0x1111, "example.com.", 300));
         let (msg, expired) = cache.get(&key("example.com."), 0x9999).expect("hit");
@@ -120,17 +121,15 @@ mod tests {
     }
 
     #[test]
-    fn fifo_eviction_ignores_reads() {
+    fn lru_eviction_respects_reads() {
         let cache = Cache::new(2);
         cache.put(key("a.com."), response(1, "a.com.", 300));
         cache.put(key("b.com."), response(2, "b.com.", 300));
-        // 读 a 多次——FIFO 下不得改变淘汰顺序
-        for _ in 0..5 {
-            cache.get(&key("a.com."), 7);
-        }
+        // 读 a——LRU 下 a 变为最近使用，b 成为最久未用
+        cache.get(&key("a.com."), 7);
         cache.put(key("c.com."), response(3, "c.com.", 300));
-        assert!(cache.get(&key("a.com."), 7).is_none(), "a 最先插入，必须最先被逐出");
-        assert!(cache.get(&key("b.com."), 7).is_some());
+        assert!(cache.get(&key("b.com."), 7).is_none(), "b 最久未用，必须最先被逐出");
+        assert!(cache.get(&key("a.com."), 7).is_some(), "a 被读过，应存活");
         assert!(cache.get(&key("c.com."), 7).is_some());
     }
 
