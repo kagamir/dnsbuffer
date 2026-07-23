@@ -6,6 +6,10 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
+use crate::bootstrap::Bootstrap;
+use crate::config::RuleSource;
+use std::time::Duration;
+
 const BLOCK_TTL: u32 = 300;
 
 fn normalize(name: &str) -> String {
@@ -160,6 +164,72 @@ impl Filter {
     }
 }
 
+/// 加载全部规则源（本地 path / 远程 url），单源失败 warn 跳过。
+pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> RuleSet {
+    let mut merged = RuleSet::default();
+    for s in sources {
+        let text = if let Some(path) = &s.path {
+            match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!("reading rule file {path} failed: {e}");
+                    continue;
+                }
+            }
+        } else if let Some(url) = &s.url {
+            match crate::fetch::fetch_url(url, bootstrap).await {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => {
+                    tracing::warn!("fetching rules {url} failed: {e:#}");
+                    continue;
+                }
+            }
+        } else {
+            tracing::warn!("rule source with neither path nor url, skipping");
+            continue;
+        };
+        merged.merge(parse_rules(&text));
+    }
+    let (b, e) = merged.len();
+    tracing::info!("loaded {b} blocked / {e} exception rules");
+    merged
+}
+
+/// 有定时 url 源时启动后台刷新：按最小合法周期整体重拉并热替换。
+pub fn spawn_updater(filter: Arc<Filter>, sources: Vec<RuleSource>, bootstrap: Arc<Bootstrap>) {
+    let mut min_interval: Option<Duration> = None;
+    for s in &sources {
+        if s.url.is_some() {
+            if let Some(iv) = &s.update_interval {
+                match humantime::parse_duration(iv) {
+                    Ok(d) if !d.is_zero() => {
+                        min_interval = Some(min_interval.map_or(d, |m| m.min(d)));
+                    }
+                    Ok(_) => tracing::warn!("zero update_interval ignored"),
+                    Err(e) => tracing::warn!("invalid update_interval {iv}: {e}"),
+                }
+            }
+        }
+    }
+    let Some(period) = min_interval else { return };
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await; // 首个 tick 立即完成，跳过（启动时已加载）
+        loop {
+            ticker.tick().await;
+            let rules = load_sources(&sources, &bootstrap).await;
+            let (b, _) = rules.len();
+            if b == 0 {
+                tracing::warn!("periodic rule refresh yielded 0 blocked entries, keeping old set");
+                continue;
+            }
+            filter.store(rules);
+            tracing::info!("rule set refreshed");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +318,38 @@ plain-blocked.dev
         f.store(parse_rules("||only.new.rule^"));
         assert!(!f.is_blocked("plain-blocked.dev"), "old rules replaced");
         assert!(f.is_blocked("only.new.rule"));
+    }
+
+    #[tokio::test]
+    async fn load_sources_merges_file_and_url() {
+        let dir = std::env::temp_dir().join("dnsbuffer-filter-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("local.txt");
+        std::fs::write(&file, "0.0.0.0 local-file-blocked.com\n").unwrap();
+
+        let addr = crate::fetch::tests::spawn_http_server("||remote-blocked.example^\n").await;
+        let sources = vec![
+            crate::config::RuleSource {
+                path: Some(file.to_string_lossy().into_owned()),
+                url: None,
+                update_interval: None,
+            },
+            crate::config::RuleSource {
+                path: None,
+                url: Some(format!("http://{addr}/rules.txt")),
+                update_interval: None,
+            },
+            crate::config::RuleSource {
+                path: None,
+                url: Some(format!("http://{addr}/missing")), // 失败源仅 warn 跳过
+                update_interval: None,
+            },
+        ];
+        let bootstrap = crate::bootstrap::Bootstrap::from_config(&[]).unwrap();
+        let rules = load_sources(&sources, &bootstrap).await;
+        let f = Filter::new(&[]);
+        f.store(rules);
+        assert!(f.is_blocked("local-file-blocked.com"));
+        assert!(f.is_blocked("remote-blocked.example"));
     }
 }

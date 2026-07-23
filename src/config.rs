@@ -110,7 +110,7 @@ pub enum BlockResponse {
     Zero,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct RuleSource {
     #[serde(default)]
     pub path: Option<String>,
