@@ -1,0 +1,7 @@
+[server]
+listen = "0.0.0.0:53"
+tcp = true
+
+[[upstream]]
+type = "plain"
+addr = "1.1.1.1:53"

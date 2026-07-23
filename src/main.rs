@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+mod config;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
