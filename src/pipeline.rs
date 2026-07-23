@@ -42,6 +42,10 @@ impl Pipeline {
 
     fn prepared_query(&self, query: &Message) -> Message {
         let mut q = query.clone();
+        // 默认剥离客户端自带的 ECS，避免泄露客户端真实来源
+        if let Some(edns) = q.edns.as_mut() {
+            edns.options_mut().remove(hickory_proto::rr::rdata::opt::EdnsCode::Subnet);
+        }
         if let Some(subnet) = &self.ecs {
             crate::ecs::inject(&mut q, subnet);
         }
@@ -243,5 +247,34 @@ mod tests {
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         tokio::time::sleep(Duration::from_millis(200)).await; // 等后台任务
         assert_eq!(counter.load(Ordering::SeqCst), 2, "后台刷新必须调用上游");
+    }
+
+    #[test]
+    fn prepared_query_strips_client_supplied_ecs_when_disabled() {
+        // 客户端自带 ECS 选项，pipeline 未配置 ecs（None）——必须剥离，不得转发上游
+        let pipeline = Pipeline::new(default_parts(Arc::new(OkResolver)));
+        let mut q = sample_query();
+        let client_subnet = crate::ecs::parse_subnet("198.51.100.0/24").unwrap();
+        crate::ecs::inject(&mut q, &client_subnet);
+        assert!(
+            q.edns
+                .as_ref()
+                .unwrap()
+                .option(hickory_proto::rr::rdata::opt::EdnsCode::Subnet)
+                .is_some(),
+            "sanity: client ECS option present before prepare"
+        );
+
+        let prepared = pipeline.prepared_query(&q);
+
+        // wire 往返，确保编解码层面也不携带 ECS
+        let bytes = prepared.to_vec().unwrap();
+        let decoded = Message::from_vec(&bytes).unwrap();
+        let has_subnet = decoded
+            .edns
+            .as_ref()
+            .and_then(|e| e.option(hickory_proto::rr::rdata::opt::EdnsCode::Subnet))
+            .is_some();
+        assert!(!has_subnet, "client-supplied ECS must be stripped when ecs is disabled");
     }
 }

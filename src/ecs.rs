@@ -46,7 +46,11 @@ pub fn parse_subnet(s: &str) -> Result<EcsSubnet> {
 pub fn is_global(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            !(v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified())
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)) // CGNAT 100.64.0.0/10
         }
         IpAddr::V6(v6) => {
             let seg0 = v6.segments()[0];
@@ -136,7 +140,15 @@ mod tests {
     #[test]
     fn global_detection() {
         assert!(is_global(&IpAddr::from_str("203.0.113.1").unwrap()));
-        for private in ["10.0.0.1", "172.16.5.5", "192.168.1.1", "127.0.0.1", "fe80::1", "fd00::1"] {
+        for private in [
+            "10.0.0.1",
+            "172.16.5.5",
+            "192.168.1.1",
+            "127.0.0.1",
+            "fe80::1",
+            "fd00::1",
+            "100.64.1.1",
+        ] {
             assert!(!is_global(&IpAddr::from_str(private).unwrap()), "{private} is not global");
         }
     }

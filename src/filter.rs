@@ -177,10 +177,14 @@ pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> Rule
                 }
             }
         } else if let Some(url) = &s.url {
-            match crate::fetch::fetch_url(url, bootstrap).await {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                Err(e) => {
+            match tokio::time::timeout(std::time::Duration::from_secs(60), crate::fetch::fetch_url(url, bootstrap)).await {
+                Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+                Ok(Err(e)) => {
                     tracing::warn!("fetching rules {url} failed: {e:#}");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!("fetching rules {url} timed out");
                     continue;
                 }
             }

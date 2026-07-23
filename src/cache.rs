@@ -33,6 +33,7 @@ pub struct Cache {
 }
 
 impl Cache {
+    /// `max_entries` 会被夹紧到 ≥1（0 会导致缓存永远不可能命中）。
     pub fn new(max_entries: usize) -> Self {
         Self { map: Mutex::new(LinkedHashMap::new()), max_entries: max_entries.max(1) }
     }
