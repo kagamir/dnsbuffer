@@ -9,7 +9,7 @@
 - **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧
 - **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选
 - **Bootstrap DNS**：支持 IP / DoH / DoT 形态；非 IP 形态必须显式注明域名对应 IP
-- **快速重试（对冲）**：主上游尝试超过 `fast_retry_ms`（默认 1000ms）未返回，即并行发起新尝试且不取消在途的（重新加权选择，大概率换上游）；任一返回即胜出，直到 `upstream_timeout_ms` 预算耗尽
+- **对冲式重试**：主上游尝试超过 `hedged_retry_ms`（默认 1000ms）未返回，即并行发起新尝试且不取消在途的（重新加权选择，大概率换上游）；任一返回即胜出，直到 `upstream_timeout_ms` 预算耗尽
 - **后备 DNS**：主上游组全部失败或超时后自动接管（IP / DoH / DoT）
 - **乐观缓存**：纯内存 LRU（hashlink 链式哈希表）——命中即回（过期也返回），过期命中触发后台异步刷新，超限逐出最久未用；只缓存 NoError
 - **自定义 hosts**：精确匹配 + `*.` 通配，直接本地应答
@@ -47,7 +47,7 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 listen = "0.0.0.0:53"        # 监听地址（仅 UDP）
 query_timeout_ms = 10000     # 单查询总超时（毫秒），包裹上游+后备整链
 prefer_ipv6 = false          # 拨号上游的地址族偏好；true 则 IPv6 优先（默认 IPv4 优先）
-fast_retry_ms = 1000         # 快速重试（对冲）间隔（毫秒）；0 禁用
+hedged_retry_ms = 1000       # 对冲式重试间隔（毫秒）；0 禁用
 
 [cache]
 max_entries = 10000          # LRU 缓存最大条数
@@ -116,7 +116,7 @@ addr = "8.8.8.8:53"
 
 ```
 UDP 收包 → hosts 匹配 → 广告屏蔽 → LRU 缓存（乐观命中，过期后台刷新）
-        → ECS 注入 → 上游组（加权随机 + 失败重选，超 fast_retry_ms 对冲并发重试）→ 后备组 → SERVFAIL
+        → ECS 注入 → 上游组（加权随机 + 失败重选，超 hedged_retry_ms 对冲并发重试）→ 后备组 → SERVFAIL
 ```
 
 ## systemd 服务示例
@@ -165,7 +165,7 @@ src/
     doh3.rs       HTTP/3 连接封装（quinn/h3）
     selector.rs   加权随机抽取（纯函数）
     group.rs      上游组（统计反馈 + 重选）+ FallbackResolver
-    hedged.rs     对冲式快速重试（fast_retry_ms 并发再尝试）
+    hedged.rs     对冲式重试（hedged_retry_ms 并发再尝试）
   bootstrap.rs    上游域名 IP 解析 + HTTPS 记录 ECH 获取
   cache.rs        纯内存 LRU 乐观缓存
   hosts.rs        自定义 hosts

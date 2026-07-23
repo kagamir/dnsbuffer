@@ -47,11 +47,11 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
     let ecs = crate::ecs::subnet_from_config(&config.ecs).await;
 
     let mut primary = build_group(&config.upstream, config, &bootstrap).await?;
-    // 快速重试（对冲）：主上游尝试超过 fast_retry_ms 未返回即并行再发，0 禁用
-    if config.server.fast_retry_ms > 0 {
+    // 对冲式重试：主上游尝试超过 hedged_retry_ms 未返回即并行再发，0 禁用
+    if config.server.hedged_retry_ms > 0 {
         primary = Arc::new(crate::upstream::hedged::HedgedResolver::new(
             primary,
-            std::time::Duration::from_millis(config.server.fast_retry_ms),
+            std::time::Duration::from_millis(config.server.hedged_retry_ms),
             std::time::Duration::from_millis(config.server.upstream_timeout_ms),
         ));
     }

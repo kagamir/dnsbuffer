@@ -32,7 +32,7 @@ fn default_upstream_timeout_ms() -> u64 {
     5_000
 }
 
-fn default_fast_retry_ms() -> u64 {
+fn default_hedged_retry_ms() -> u64 {
     1_000
 }
 
@@ -48,10 +48,10 @@ pub struct ServerConfig {
     /// 拨号上游时的地址族偏好：true 则 IPv6 优先；默认 false（IPv4 优先）。
     #[serde(default)]
     pub prefer_ipv6: bool,
-    /// 快速重试（对冲）间隔（毫秒）：主上游尝试超过该时长未返回，即并行发起新尝试
+    /// 对冲式重试间隔（毫秒）：主上游尝试超过该时长未返回，即并行发起新尝试
     /// 而不取消在途的；任一返回即胜出，直到 upstream_timeout_ms 耗尽。0 表示禁用。
-    #[serde(default = "default_fast_retry_ms")]
-    pub fast_retry_ms: u64,
+    #[serde(default = "default_hedged_retry_ms")]
+    pub hedged_retry_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -320,7 +320,7 @@ mod tests {
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
         assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
-        assert_eq!(cfg.server.fast_retry_ms, 1_000, "hedged retry interval defaults to 1s");
+        assert_eq!(cfg.server.hedged_retry_ms, 1_000, "hedged retry interval defaults to 1s");
     }
 
     #[test]
