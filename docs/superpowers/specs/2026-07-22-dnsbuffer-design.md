@@ -63,7 +63,7 @@ DoH / DoT / 明文 UDP 三种上游实现共用它，于是「上游组」「boo
 src/
   main.rs         入口：加载配置 → 构建各组件 → 启动 server
   config.rs       TOML 配置结构 + 启动时校验
-  server.rs       UDP:53 监听（+ TCP:53 处理 truncation）；每查询 spawn task
+  server.rs       UDP:53 监听；每查询 spawn task
   pipeline.rs     单次查询编排（hosts→filter→cache→upstream→fallback）
   resolver.rs     Resolver trait 定义
   upstream/
@@ -177,7 +177,6 @@ Bootstrap 解析器同样是 `Resolver` trait 的实现，复用 `plain.rs` / `d
 ```toml
 [server]
 listen = "0.0.0.0:53"
-tcp = true
 
 [cache]
 max_entries = 10000
@@ -234,6 +233,7 @@ ips = ["9.9.9.9"]
 
 ## 13. 非目标（YAGNI）
 
+- 不实现 TCP 监听 / TC-bit 截断回退（仅 UDP 服务端，经用户确认删除）。
 - 不内置守护进程化 / 服务封装（交给 systemd 等外部工具）。
 - 缓存不落盘、无跨重启持久化。
 - 不实现 Web 管理界面。

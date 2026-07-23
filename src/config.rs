@@ -35,8 +35,6 @@ fn default_query_timeout_ms() -> u64 {
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
-    #[serde(default = "default_true")]
-    pub tcp: bool,
     /// 单查询总超时（毫秒），包裹「上游+后备」整链。
     #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
@@ -200,7 +198,6 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.server.listen.to_string(), "127.0.0.1:5300");
-        assert!(cfg.server.tcp, "tcp defaults to true");
         assert_eq!(cfg.upstream.len(), 1);
         match &cfg.upstream[0] {
             UpstreamConfig::Plain { addr } => assert_eq!(addr.to_string(), "1.1.1.1:53"),
