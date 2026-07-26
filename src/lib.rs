@@ -19,6 +19,7 @@ use anyhow::Result;
 
 use crate::bootstrap::Bootstrap;
 use crate::config::{Config, UpstreamConfig};
+use crate::dashboard::upstreams::UpstreamMetricsBuilder;
 use crate::pipeline::Pipeline;
 use crate::resolver::Resolver;
 use crate::upstream::group::{FallbackResolver, UpstreamGroup};
@@ -26,6 +27,13 @@ use crate::upstream::group::{FallbackResolver, UpstreamGroup};
 /// 依据配置构建完整解析链：bootstrap → filter → hosts → cache → ECS → 上游组
 /// →（可选）后备组 → Pipeline 装配。
 pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
+    Ok(build_pipeline_with_metrics(config).await?.0)
+}
+
+/// 构建解析管线，并保留与调度共享的上游统计供 dashboard HTTP 层使用。
+pub async fn build_pipeline_with_metrics(
+    config: &Config,
+) -> Result<(Arc<Pipeline>, crate::dashboard::upstreams::UpstreamMetrics)> {
     let bootstrap = Arc::new(Bootstrap::from_config(
         &config.bootstrap.servers,
         config.server.prefer_ipv6,
@@ -56,7 +64,15 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
         .detach()
     };
 
-    let mut primary = build_group(&config.upstream, config, &bootstrap).await?;
+    let mut metrics = UpstreamMetricsBuilder::default();
+    let mut primary = build_group(
+        &config.upstream,
+        config,
+        &bootstrap,
+        &mut metrics,
+        "primary",
+    )
+    .await?;
     // 对冲式重试：主上游尝试超过 hedged_retry_ms 未返回即并行再发，0 禁用
     if config.server.hedged_retry_ms > 0 {
         primary = Arc::new(crate::upstream::hedged::HedgedResolver::new(
@@ -68,15 +84,23 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
     let resolver: Arc<dyn Resolver> = if config.fallback.is_empty() {
         primary
     } else {
-        let fb = build_group(&config.fallback, config, &bootstrap).await?;
+        let fb = build_group(
+            &config.fallback,
+            config,
+            &bootstrap,
+            &mut metrics,
+            "fallback",
+        )
+        .await?;
         Arc::new(FallbackResolver::new(
             primary,
             fb,
             std::time::Duration::from_millis(config.server.upstream_timeout_ms),
         ))
     };
+    let metrics = metrics.build();
 
-    Ok(Arc::new(Pipeline::new(crate::pipeline::PipelineParts {
+    let pipeline = Arc::new(Pipeline::new(crate::pipeline::PipelineParts {
         hosts,
         filter,
         cache,
@@ -85,13 +109,16 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
         query_timeout: std::time::Duration::from_millis(config.server.query_timeout_ms),
         #[cfg(not(test))]
         recorder,
-    })))
+    }));
+    Ok((pipeline, metrics))
 }
 
 async fn build_group(
     entries: &[UpstreamConfig],
     config: &Config,
     bootstrap: &Bootstrap,
+    metrics: &mut UpstreamMetricsBuilder,
+    group_kind: &'static str,
 ) -> Result<Arc<dyn Resolver>> {
     let mut members: Vec<(String, Arc<dyn Resolver>)> = Vec::new();
     for u in entries {
@@ -100,7 +127,13 @@ async fn build_group(
     if members.is_empty() {
         anyhow::bail!("no upstreams configured");
     }
-    Ok(Arc::new(UpstreamGroup::new(members, config.selector.window, config.selector.k)))
+    Ok(Arc::new(UpstreamGroup::new(
+        members,
+        config.selector.window,
+        config.selector.k,
+        metrics,
+        group_kind,
+    )))
 }
 
 async fn build_member(
@@ -118,10 +151,19 @@ async fn build_member(
             let tls = Arc::new(crate::tls::client_config(&[], &[], None)?);
             Ok((
                 format!("dot:{host}"),
-                Arc::new(DotResolver::new(std::net::SocketAddr::new(*ip, port), &host, tls)?),
+                Arc::new(DotResolver::new(
+                    std::net::SocketAddr::new(*ip, port),
+                    &host,
+                    tls,
+                )?),
             ))
         }
-        UpstreamConfig::Doh { url, ech, http3, ip } => {
+        UpstreamConfig::Doh {
+            url,
+            ech,
+            http3,
+            ip,
+        } => {
             let uri: http::Uri = url.parse()?;
             let host = uri.host().unwrap_or_default().to_string();
             let ips = match ip {

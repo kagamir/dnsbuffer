@@ -4,6 +4,7 @@ use hickory_proto::op::Message;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::dashboard::upstreams::UpstreamMetricsBuilder;
 use crate::resolver::Resolver;
 use crate::stats::UpstreamStats;
 use crate::upstream::selector::pick_weighted;
@@ -14,7 +15,7 @@ const MAX_ATTEMPTS: usize = 2;
 struct Member {
     name: String,
     resolver: Arc<dyn Resolver>,
-    stats: Mutex<UpstreamStats>,
+    stats: Arc<Mutex<UpstreamStats>>,
 }
 
 /// 上游组：滑动窗口统计驱动加权随机选择，失败重选，统计反馈。
@@ -24,13 +25,23 @@ pub struct UpstreamGroup {
 }
 
 impl UpstreamGroup {
-    pub fn new(members: Vec<(String, Arc<dyn Resolver>)>, window: usize, k: f64) -> Self {
+    pub fn new(
+        members: Vec<(String, Arc<dyn Resolver>)>,
+        window: usize,
+        k: f64,
+        metrics: &mut UpstreamMetricsBuilder,
+        group_kind: &'static str,
+    ) -> Self {
         let members = members
             .into_iter()
-            .map(|(name, resolver)| Member {
-                name,
-                resolver,
-                stats: Mutex::new(UpstreamStats::new(window)),
+            .map(|(name, resolver)| {
+                let stats = Arc::new(Mutex::new(UpstreamStats::new(window)));
+                metrics.register(name.clone(), group_kind, stats.clone());
+                Member {
+                    name,
+                    resolver,
+                    stats,
+                }
             })
             .collect();
         Self { members, k }
@@ -123,7 +134,11 @@ impl FallbackResolver {
         fallback: Arc<dyn Resolver>,
         primary_timeout: std::time::Duration,
     ) -> Self {
-        Self { primary, fallback, primary_timeout }
+        Self {
+            primary,
+            fallback,
+            primary_timeout,
+        }
     }
 }
 
@@ -150,6 +165,7 @@ impl Resolver for FallbackResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dashboard::upstreams::UpstreamMetricsBuilder;
     use crate::resolver::Resolver;
     use anyhow::{anyhow, Result};
     use async_trait::async_trait;
@@ -189,9 +205,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_share_group_stats_and_distinguish_primary_from_fallback() {
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let primary = UpstreamGroup::new(
+            vec![(
+                "primary-ok".into(),
+                Arc::new(CountingOk(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+            )],
+            8,
+            5.0,
+            &mut metrics,
+            "primary",
+        );
+        let fallback = UpstreamGroup::new(
+            vec![(
+                "fallback-dead".into(),
+                Arc::new(AlwaysErr(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+            )],
+            8,
+            5.0,
+            &mut metrics,
+            "fallback",
+        );
+        let metrics = metrics.build();
+
+        primary
+            .resolve(&sample_query())
+            .await
+            .expect("primary succeeds");
+        assert!(fallback.resolve(&sample_query()).await.is_err());
+
+        let snapshots = metrics.snapshot();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].name, "primary-ok");
+        assert_eq!(snapshots[0].group, "primary");
+        assert_eq!(snapshots[0].samples, 1);
+        assert_eq!(snapshots[0].successes, 1);
+        assert_eq!(snapshots[0].failure_rate, 0.0);
+        assert_eq!(snapshots[1].name, "fallback-dead");
+        assert_eq!(snapshots[1].group, "fallback");
+        assert_eq!(snapshots[1].samples, 1);
+        assert_eq!(snapshots[1].successes, 0);
+        assert_eq!(snapshots[1].failure_rate, 1.0);
+        assert_eq!(snapshots[1].avg_latency_ms, None);
+    }
+
+    #[tokio::test]
+    async fn metrics_record_every_retry_attempt() {
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let group = UpstreamGroup::new(
+            vec![
+                (
+                    "dead".into(),
+                    Arc::new(AlwaysErr(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+                ),
+                (
+                    "ok".into(),
+                    Arc::new(CountingOk(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+                ),
+            ],
+            64,
+            5.0,
+            &mut metrics,
+            "primary",
+        );
+        let metrics = metrics.build();
+
+        for _ in 0..20 {
+            group
+                .resolve(&sample_query())
+                .await
+                .expect("retry eventually succeeds");
+        }
+
+        let snapshots = metrics.snapshot();
+        let actual_samples: usize = snapshots.iter().map(|snapshot| snapshot.samples).sum();
+        let actual_failures: usize = snapshots
+            .iter()
+            .map(|snapshot| snapshot.samples - snapshot.successes)
+            .sum();
+        assert_eq!(actual_samples, 20 + actual_failures);
+    }
+
+    #[tokio::test]
+    async fn poisoned_stats_do_not_block_dns_resolution() {
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let group = UpstreamGroup::new(
+            vec![(
+                "ok".into(),
+                Arc::new(CountingOk(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+            )],
+            8,
+            5.0,
+            &mut metrics,
+            "primary",
+        );
+        let stats = group.members[0].stats.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = stats.lock().unwrap();
+            panic!("poison group stats lock");
+        })
+        .join();
+
+        group
+            .resolve(&sample_query())
+            .await
+            .expect("stats poison must not affect DNS");
+    }
+
+    #[tokio::test]
     async fn failing_member_retries_on_healthy_one() {
         let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
         let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
+        let mut metrics = UpstreamMetricsBuilder::default();
         let group = UpstreamGroup::new(
             vec![
                 ("bad".into(), bad.clone() as Arc<dyn Resolver>),
@@ -199,19 +325,28 @@ mod tests {
             ],
             8,
             5.0,
+            &mut metrics,
+            "primary",
         );
         // 多次调用：每次都应最终成功（坏成员失败后重选好成员）
         for _ in 0..10 {
-            let resp = group.resolve(&sample_query()).await.expect("group resolves");
+            let resp = group
+                .resolve(&sample_query())
+                .await
+                .expect("group resolves");
             assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         }
-        assert!(ok.0.load(Ordering::SeqCst) >= 10, "healthy member served all queries");
+        assert!(
+            ok.0.load(Ordering::SeqCst) >= 10,
+            "healthy member served all queries"
+        );
     }
 
     #[tokio::test]
     async fn weights_shift_away_from_failures() {
         let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
         let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
+        let mut metrics = UpstreamMetricsBuilder::default();
         let group = UpstreamGroup::new(
             vec![
                 ("bad".into(), bad.clone() as Arc<dyn Resolver>),
@@ -219,6 +354,8 @@ mod tests {
             ],
             8,
             5.0,
+            &mut metrics,
+            "primary",
         );
         for _ in 0..50 {
             let _ = group.resolve(&sample_query()).await;
@@ -226,13 +363,23 @@ mod tests {
         let bad_hits = bad.0.load(Ordering::SeqCst);
         let ok_hits = ok.0.load(Ordering::SeqCst);
         // 权重衰减后坏成员被选中的次数应显著低于好成员
-        assert!(ok_hits > bad_hits, "ok {ok_hits} should exceed bad {bad_hits}");
+        assert!(
+            ok_hits > bad_hits,
+            "ok {ok_hits} should exceed bad {bad_hits}"
+        );
     }
 
     #[tokio::test]
     async fn all_dead_is_error() {
         let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
-        let group = UpstreamGroup::new(vec![("bad".into(), bad as Arc<dyn Resolver>)], 8, 5.0);
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let group = UpstreamGroup::new(
+            vec![("bad".into(), bad as Arc<dyn Resolver>)],
+            8,
+            5.0,
+            &mut metrics,
+            "primary",
+        );
         assert!(group.resolve(&sample_query()).await.is_err());
     }
 
@@ -240,10 +387,26 @@ mod tests {
     async fn fallback_takes_over_when_primary_dies() {
         let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
         let bad = Arc::new(AlwaysErr(AtomicUsize::new(0)));
-        let primary = Arc::new(UpstreamGroup::new(vec![("bad".into(), bad as Arc<dyn Resolver>)], 8, 5.0));
-        let fallback = Arc::new(UpstreamGroup::new(vec![("ok".into(), ok as Arc<dyn Resolver>)], 8, 5.0));
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let primary = Arc::new(UpstreamGroup::new(
+            vec![("bad".into(), bad as Arc<dyn Resolver>)],
+            8,
+            5.0,
+            &mut metrics,
+            "primary",
+        ));
+        let fallback = Arc::new(UpstreamGroup::new(
+            vec![("ok".into(), ok as Arc<dyn Resolver>)],
+            8,
+            5.0,
+            &mut metrics,
+            "fallback",
+        ));
         let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_secs(5));
-        let resp = chain.resolve(&sample_query()).await.expect("fallback serves");
+        let resp = chain
+            .resolve(&sample_query())
+            .await
+            .expect("fallback serves");
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }
 
@@ -260,20 +423,33 @@ mod tests {
     #[tokio::test]
     async fn fallback_takes_over_when_primary_hangs() {
         let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
+        let mut metrics = UpstreamMetricsBuilder::default();
         let primary = Arc::new(UpstreamGroup::new(
             vec![("hang".into(), Arc::new(Hang) as Arc<dyn Resolver>)],
             8,
             5.0,
+            &mut metrics,
+            "primary",
         ));
-        let fallback = Arc::new(UpstreamGroup::new(vec![("ok".into(), ok as Arc<dyn Resolver>)], 8, 5.0));
+        let fallback = Arc::new(UpstreamGroup::new(
+            vec![("ok".into(), ok as Arc<dyn Resolver>)],
+            8,
+            5.0,
+            &mut metrics,
+            "fallback",
+        ));
         // 主上游黑洞：必须在 upstream_timeout(200ms) 到点后切到 fallback，而不是干等
         let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_millis(200));
         let start = std::time::Instant::now();
-        let resp = chain.resolve(&sample_query()).await.expect("fallback serves after timeout");
+        let resp = chain
+            .resolve(&sample_query())
+            .await
+            .expect("fallback serves after timeout");
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         let elapsed = start.elapsed();
         assert!(
-            elapsed >= std::time::Duration::from_millis(200) && elapsed < std::time::Duration::from_secs(2),
+            elapsed >= std::time::Duration::from_millis(200)
+                && elapsed < std::time::Duration::from_secs(2),
             "should cut over right after the 200ms primary budget, took {elapsed:?}"
         );
     }

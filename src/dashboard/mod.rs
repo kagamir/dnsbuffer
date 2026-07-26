@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -63,3 +63,4 @@ impl Recorder {
 }
 
 pub mod store;
+pub mod upstreams;
