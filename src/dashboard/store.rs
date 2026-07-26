@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ const MAX_BATCH_SIZE: usize = 128;
 const BATCH_WAIT: Duration = Duration::from_millis(100);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+static STORE_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub struct StoreWorker {
     recorder: Option<Recorder>,
@@ -214,10 +216,19 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        let _open_guard = STORE_OPEN_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("store open mutex poisoned");
         let store = Self {
             path: path.to_owned(),
         };
         let mut conn = store.connect()?;
+        let journal_mode: String =
+            conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             bail!("database uses newer schema version {version}");
@@ -266,7 +277,6 @@ impl Store {
         let conn = Connection::open(&self.path)?;
         conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
         Ok(conn)
     }
 

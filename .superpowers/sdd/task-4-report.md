@@ -10,14 +10,14 @@ Implemented non-blocking DNS query history recording and the SQLite store worker
 - Added store worker tests for shutdown flushing and cleanup while idle.
 - `cargo test pipeline::tests -- --nocapture` initially failed to compile because `Recorder`, `StoreWorker`, and `PipelineParts.recorder` did not exist.
 - The worker test then exposed a panic from constructing a Tokio timer outside the worker's current-thread runtime. Moving the complete timed receive batch into `runtime.block_on` fixed the root cause.
-- The first full `cargo test` exposed concurrent integration-test initialization failing with `database is locked`. `Store::connect` was executing `PRAGMA journal_mode=WAL` before setting `busy_timeout`; setting the timeout first fixed that initialization race.
+- Full-suite verification exposed concurrent integration-test initialization failing with `database is locked`. Every connection was re-running `PRAGMA journal_mode=WAL`; moving WAL initialization into a process-serialized `Store::open` path removed that race.
 
 ## GREEN
 
 - `cargo test pipeline::tests -- --nocapture`: 7 passed, 0 failed.
 - `cargo test dashboard::store::tests -- --nocapture`: 15 passed, 0 failed.
 - `cargo test --test forwarding`: 5 passed, 0 failed.
-- `cargo test`: 106 library tests and 5 integration tests passed; 0 failed. Doc tests also passed.
+- `cargo test`: 106 library tests and 5 integration tests passed; 0 failed. Doc tests also passed (final run after the initialization-race fix).
 - `git diff --cached --check`: passed with no whitespace errors.
 - `cargo clippy --all-targets -- -D warnings`: blocked by two pre-existing `collapsible_if` findings in `src/bootstrap.rs:110` and `src/filter.rs:206`; no task-4 finding remained after fixing the pipeline findings.
 
