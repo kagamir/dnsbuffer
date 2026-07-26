@@ -137,7 +137,7 @@ async fn queries_validate_pagination_search_and_return_utc_timestamps() {
     let domain = request(app.clone(), "/api/dashboard/queries?search=caf%C3%A9%2Bdns").await;
     assert_eq!(domain.status(), StatusCode::OK);
     let domain = json(domain).await;
-    assert_eq!(domain["total"], 1);
+    assert_eq!(domain["total"], "1");
     assert_eq!(domain["records"][0]["domain"], "café+dns.example");
 
     let response = request(
@@ -147,7 +147,7 @@ async fn queries_validate_pagination_search_and_return_utc_timestamps() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
-    assert_eq!(body["total"], 1);
+    assert_eq!(body["total"], "1");
     assert_eq!(body["records"][0]["domain"], "café+dns.example");
     assert_eq!(body["records"][0]["timestamp"], "2025-07-26T00:00:00Z");
     assert!(body["records"][0].get("timestamp_ms").is_none());
@@ -198,30 +198,31 @@ async fn all_api_routes_are_json_read_only_and_use_utc_times() {
     assert_eq!(trend["granularity"], "hour");
     let bucket = &trend["buckets"][0];
     chrono::DateTime::parse_from_rfc3339(bucket["timestamp"].as_str().unwrap()).unwrap();
-    assert!(bucket["total_queries"].is_i64());
-    assert!(bucket["blocked_queries"].is_i64());
-    assert!(bucket["cache_hits"].is_i64());
+    for field in ["total_queries", "blocked_queries", "cache_hits"] {
+        assert!(bucket[field].is_string());
+        bucket[field].as_str().unwrap().parse::<i64>().unwrap();
+    }
 
     let upstreams = json(request(app.clone(), "/api/dashboard/upstreams").await).await;
     assert_eq!(upstreams[0]["id"], "primary-0");
     assert_eq!(upstreams[0]["name"], "plain:1.1.1.1:53");
     assert_eq!(upstreams[0]["group"], "primary");
-    assert_eq!(upstreams[0]["samples"], 0);
-    assert_eq!(upstreams[0]["successes"], 0);
+    assert_eq!(upstreams[0]["samples"], "0");
+    assert_eq!(upstreams[0]["successes"], "0");
     assert_eq!(upstreams[0]["failure_rate"], 0.0);
     assert!(upstreams[0]["avg_latency_ms"].is_null());
 
     let rankings = json(request(app.clone(), "/api/dashboard/rankings").await).await;
     assert_eq!(rankings[0]["domain"], "popular.example");
-    assert_eq!(rankings[0]["total_queries"], 2);
-    assert_eq!(rankings[0]["blocked_queries"], 1);
-    assert_eq!(rankings[0]["cache_hits"], 1);
+    assert_eq!(rankings[0]["total_queries"], "2");
+    assert_eq!(rankings[0]["blocked_queries"], "1");
+    assert_eq!(rankings[0]["cache_hits"], "1");
     assert_eq!(rankings[1]["domain"], "other.example");
 
     let queries = json(request(app, "/api/dashboard/queries").await).await;
     assert_eq!(queries["page"], 1);
     assert_eq!(queries["page_size"], 50);
-    assert_eq!(queries["total"], 3);
+    assert_eq!(queries["total"], "3");
     let record = queries["records"]
         .as_array()
         .unwrap()
@@ -389,12 +390,15 @@ async fn embedded_frontend_contract() {
         "encodeURIComponent(state.search)",
         "page: 1",
         "root.DnsDashboard",
+        "DOMContentLoaded",
+        "createRoundTracker",
+        "queryResponseDecision",
     ] {
         assert!(app_js.contains(marker), "app.js missing {marker}");
     }
 
     let chart_js = text(request(app, "/chart.js").await).await;
-    for marker in ["granularity", "setLineDash", "normalizeValue"] {
+    for marker in ["granularity", "setLineDash", "parseCount"] {
         assert!(chart_js.contains(marker), "chart.js missing {marker}");
     }
 }

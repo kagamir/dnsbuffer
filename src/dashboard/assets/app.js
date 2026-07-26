@@ -3,21 +3,39 @@
   const api = factory();
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.DnsDashboard = api;
-  if (typeof document !== "undefined") api.start();
+  if (typeof document !== "undefined") {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", api.start, { once: true });
+    else api.start();
+  }
 }(typeof window !== "undefined" ? window : globalThis, function () {
   "use strict";
 
-  function paginationDecision(page, pageSize, total, corrected) {
-    const safeTotal = Math.max(0, Number(total) || 0);
-    const totalPages = Math.max(1, Math.ceil(safeTotal / pageSize));
-    const target = Math.min(Math.max(1, page), totalPages);
-    return { page: target, totalPages, retry: target !== page && !corrected };
+  function parseCount(value) {
+    return typeof value === "string" && /^\d+$/.test(value) ? BigInt(value) : 0n;
+  }
+
+  function queryResponseDecision(requestedPage, currentPage, pageSize, total, corrected) {
+    const totalPages = (parseCount(total) + BigInt(pageSize) - 1n) / BigInt(pageSize) || 1n;
+    if (requestedPage !== currentPage) return { page: currentPage, totalPages, action: "ignore" };
+    if (BigInt(requestedPage) <= totalPages) return { page: requestedPage, totalPages, action: "render" };
+    const page = Number(totalPages);
+    return { page, totalPages, action: corrected ? "reject" : "retry" };
+  }
+
+  function applyQueryResponse(state, requestedPage, pageSize, total, corrected) {
+    const decision = queryResponseDecision(requestedPage, state.requestedPage, pageSize, total, corrected);
+    if (decision.action === "retry") state.requestedPage = decision.page;
+    if (decision.action === "render") {
+      state.page = decision.page;
+      state.totalPages = decision.totalPages;
+    }
+    return decision;
   }
 
   function paginationControls(page, totalPages, loading) {
     return {
       previous: !loading && page > 1,
-      next: !loading && (totalPages == null || page < totalPages)
+      next: !loading && (totalPages == null || BigInt(page) < totalPages)
     };
   }
 
@@ -29,12 +47,27 @@
     return { search: value.trim(), page: 1, totalPages: null };
   }
 
+  function createRoundTracker(names) {
+    let activeId = 0;
+    let results = new Map();
+    return {
+      begin() { activeId += 1; results = new Map(); return activeId; },
+      record(id, name, success) {
+        if (id !== activeId || !names.includes(name)) return null;
+        results.set(name, success);
+        const complete = results.size === names.length;
+        const failed = [...results.values()].filter((result) => !result).length;
+        return { id, complete, success: complete && failed === 0, failed };
+      }
+    };
+  }
+
   function upstreamStatus(upstream) {
-    const samples = Math.max(0, Number(upstream.samples) || 0);
-    const successes = Math.max(0, Number(upstream.successes) || 0);
+    const samples = parseCount(upstream.samples);
+    const successes = parseCount(upstream.successes);
     const failureRate = Math.max(0, Number(upstream.failure_rate) || 0);
-    if (samples === 0) return { text: "暂无数据", kind: "neutral" };
-    if (successes === 0) return { text: "不可用", kind: "bad" };
+    if (samples === 0n) return { text: "暂无数据", kind: "neutral" };
+    if (successes === 0n) return { text: "不可用", kind: "bad" };
     if (failureRate > 0 || successes < samples) return { text: "有失败", kind: "warn" };
     return { text: "正常", kind: "good" };
   }
@@ -42,9 +75,10 @@
   function start() {
     const state = {
       page: 1, pageSize: 50, search: "", controllers: new Map(),
-      queryLoading: false, totalPages: null, trendData: null,
-      refreshResults: new Map(), refreshPending: 0, queryRequestId: 0
+      queryLoading: false, totalPages: null, requestedPage: 1, trendData: null,
+      queryRequestId: 0
     };
+    const roundTracker = createRoundTracker(["trend", "upstreams", "rankings", "queries"]);
     const regions = Object.fromEntries(["trend", "upstreams", "rankings", "queries"].map((name) => [name, document.querySelector(`#${name}`)]));
     const previousButton = document.querySelector("#previous-page");
     const nextButton = document.querySelector("#next-page");
@@ -71,25 +105,31 @@
       regions.queries.setAttribute("aria-busy", String(loading));
       updatePagination();
     }
-    function updateRefreshStatus() {
+    function beginRefreshStatus() {
       const status = document.querySelector("#refresh-status");
       const dot = document.querySelector(".status-dot");
-      if (state.refreshPending > 0) {
-        status.textContent = "正在更新";
-        dot.className = "status-dot is-loading";
-        return;
+      status.removeAttribute("aria-live");
+      status.textContent = "正在更新";
+      dot.className = "status-dot is-loading";
+    }
+    function finishRefreshStatus(result) {
+      if (!result?.complete) return;
+      const status = document.querySelector("#refresh-status");
+      const dot = document.querySelector(".status-dot");
+      status.textContent = result.success ? "全部区域已更新" : `${result.failed} 个区域更新失败`;
+      if (result.success) {
+        status.removeAttribute("aria-live");
+        dot.className = "status-dot";
+        document.querySelector("#last-updated").textContent = `最后成功：${new Date().toLocaleTimeString()}`;
+      } else {
+        status.setAttribute("aria-live", "assertive");
+        dot.className = "status-dot has-error";
       }
-      const failed = [...state.refreshResults.values()].filter((result) => result === false).length;
-      status.textContent = failed ? `${failed} 个区域更新失败` : "全部区域已更新";
-      dot.className = failed ? "status-dot has-error" : "status-dot";
-      if (!failed && state.refreshResults.size === 4) document.querySelector("#last-updated").textContent = `最后成功：${new Date().toLocaleTimeString()}`;
     }
     async function loadRegion(name, url, render) {
       state.controllers.get(name)?.abort();
       const controller = new AbortController();
       state.controllers.set(name, controller);
-      state.refreshPending += 1;
-      updateRefreshStatus();
       try {
         const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -97,34 +137,31 @@
         if (state.controllers.get(name) !== controller) return false;
         await render(data);
         setError(name, "");
-        state.refreshResults.set(name, true);
         return true;
       } catch (error) {
         if (error.name !== "AbortError") {
           setError(name, "更新失败，正在保留上次数据");
-          state.refreshResults.set(name, false);
         }
         return false;
       } finally {
-        state.refreshPending -= 1;
         if (state.controllers.get(name) === controller) state.controllers.delete(name);
-        updateRefreshStatus();
       }
     }
     function renderTrend(data) {
       const buckets = Array.isArray(data.buckets) ? data.buckets : [];
-      state.trendData = { buckets, granularity: data.granularity };
-      window.DnsTrendChart.render(document.querySelector("#trend-chart"), buckets, data.granularity);
       const start = new Date(data.start);
       const end = new Date(data.end);
       const aggregation = data.granularity === "day" ? "按日聚合" : "按小时聚合";
+      if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) throw new Error("invalid trend range");
+      state.trendData = { buckets, granularity: data.granularity };
+      window.DnsTrendChart.render(document.querySelector("#trend-chart"), buckets, data.granularity);
       document.querySelector("#trend-range").textContent = `${aggregation} · ${start.toLocaleString()} 至 ${end.toLocaleString()}`;
       const totals = buckets.reduce((sum, bucket) => ({
-        total: sum.total + window.DnsTrendChart.normalizeValue(bucket.total_queries),
-        blocked: sum.blocked + window.DnsTrendChart.normalizeValue(bucket.blocked_queries),
-        cache: sum.cache + window.DnsTrendChart.normalizeValue(bucket.cache_hits)
-      }), { total: 0, blocked: 0, cache: 0 });
-      document.querySelector("#trend-summary").textContent = `${aggregation}，共 ${window.DnsTrendChart.formatCount(totals.total)} 次查询，${window.DnsTrendChart.formatCount(totals.blocked)} 次屏蔽，${window.DnsTrendChart.formatCount(totals.cache)} 次缓存命中`;
+        total: sum.total + window.DnsTrendChart.parseCount(bucket.total_queries),
+        blocked: sum.blocked + window.DnsTrendChart.parseCount(bucket.blocked_queries),
+        cache: sum.cache + window.DnsTrendChart.parseCount(bucket.cache_hits)
+      }), { total: 0n, blocked: 0n, cache: 0n });
+      document.querySelector("#trend-summary").textContent = `${aggregation}，共 ${window.DnsTrendChart.exactCount(totals.total)} 次查询，${window.DnsTrendChart.exactCount(totals.blocked)} 次屏蔽，${window.DnsTrendChart.exactCount(totals.cache)} 次缓存命中`;
     }
     function renderUpstreams(data) {
       const target = document.querySelector("#upstream-list");
@@ -169,32 +206,39 @@
         if (record.blocked) addBadge(result, "已屏蔽", "badge-blocked"); if (record.cache_hit) addBadge(result, "缓存", "badge-cache");
         row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, element("td", `${record.duration_ms} ms`), result); return row;
       }));
-      document.querySelector("#page-status").textContent = `第 ${state.page} / ${state.totalPages} 页 · ${Math.max(0, Number(data.total) || 0)} 条`;
+      document.querySelector("#page-status").textContent = `第 ${state.page} / ${state.totalPages} 页 · ${parseCount(data.total)} 条`;
       updatePagination();
     }
-    async function loadQueries(corrected) {
+    async function loadQueries(corrected, roundId) {
       const requestId = ++state.queryRequestId;
       setQueryLoading(true);
-      const requestedPage = state.page;
+      if (!corrected) state.requestedPage = state.page;
+      const requestedPage = state.requestedPage;
       const query = `page=${requestedPage}&page_size=${state.pageSize}&search=${encodeURIComponent(state.search)}`;
-      let retry = false;
+      let action = "ignore";
       const success = await loadRegion("queries", `/api/dashboard/queries?${query}`, (data) => {
-        const decision = paginationDecision(requestedPage, state.pageSize, data.total, corrected);
-        state.totalPages = decision.totalPages;
-        state.page = decision.page;
-        retry = decision.retry;
-        if (!retry) renderQueries(data);
+        const decision = applyQueryResponse(state, requestedPage, state.pageSize, data.total, corrected);
+        action = decision.action;
+        if (action === "render") renderQueries(data);
       });
-      if (success && retry) return loadQueries(true);
+      if (success && action === "retry") return loadQueries(true, roundId);
+      if (success && action === "reject") setError("queries", "数据总数连续变化，已保留上次查询结果");
       if (mayFinishQuery(requestId, state.queryRequestId)) setQueryLoading(false);
-      return success;
+      return success && action === "render";
     }
     function refreshAll() {
-      state.refreshResults.clear();
-      return Promise.allSettled([
-        loadRegion("trend", "/api/dashboard/trend", renderTrend), loadRegion("upstreams", "/api/dashboard/upstreams", renderUpstreams),
-        loadRegion("rankings", "/api/dashboard/rankings", renderRankings), loadQueries(false)
-      ]);
+      const roundId = roundTracker.begin();
+      beginRefreshStatus();
+      const requests = [
+        ["trend", loadRegion("trend", "/api/dashboard/trend", renderTrend)],
+        ["upstreams", loadRegion("upstreams", "/api/dashboard/upstreams", renderUpstreams)],
+        ["rankings", loadRegion("rankings", "/api/dashboard/rankings", renderRankings)],
+        ["queries", loadQueries(false, roundId)]
+      ];
+      return Promise.allSettled(requests.map(([name, request]) => request.then((success) => {
+        finishRefreshStatus(roundTracker.record(roundId, name, success));
+        return success;
+      })));
     }
     let searchTimer;
     document.querySelector("#query-search").addEventListener("input", (event) => {
@@ -210,5 +254,5 @@
     updatePagination(); refreshAll(); window.setInterval(refreshAll, 5000);
   }
 
-  return { start, paginationDecision, paginationControls, mayFinishQuery, searchDecision, upstreamStatus };
+  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, upstreamStatus };
 }));

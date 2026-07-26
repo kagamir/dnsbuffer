@@ -121,14 +121,25 @@ fn validate_query_encoding(query: &str) -> Result<(), ApiError> {
         .map_err(|_| ApiError::bad_request("invalid query parameters"))
 }
 
-async fn rankings(State(state): State<HttpState>) -> Result<Json<Vec<Ranking>>, ApiError> {
-    Ok(Json(database_call(state.store, Store::rankings).await?))
+async fn rankings(State(state): State<HttpState>) -> Result<Json<Vec<RankingDto>>, ApiError> {
+    Ok(Json(
+        database_call(state.store, Store::rankings)
+            .await?
+            .into_iter()
+            .map(RankingDto::from)
+            .collect(),
+    ))
 }
 
-async fn upstreams(
-    State(state): State<HttpState>,
-) -> Json<Vec<super::upstreams::UpstreamSnapshot>> {
-    Json(state.upstreams.snapshot())
+async fn upstreams(State(state): State<HttpState>) -> Json<Vec<UpstreamSnapshotDto>> {
+    Json(
+        state
+            .upstreams
+            .snapshot()
+            .into_iter()
+            .map(UpstreamSnapshotDto::from)
+            .collect(),
+    )
 }
 
 async fn database_call<T, F>(store: Arc<Store>, operation: F) -> Result<T, ApiError>
@@ -200,7 +211,7 @@ fn parse_parameter(value: Option<String>, name: &str, default: u64) -> Result<u6
 struct QueryPageDto {
     page: u64,
     page_size: u64,
-    total: i64,
+    total: String,
     records: Vec<QueryRecordDto>,
 }
 
@@ -211,7 +222,7 @@ impl TryFrom<QueryPage> for QueryPageDto {
         Ok(Self {
             page: value.page,
             page_size: value.page_size,
-            total: value.total,
+            total: value.total.to_string(),
             records: value
                 .records
                 .into_iter()
@@ -280,9 +291,9 @@ impl TryFrom<TrendResponse> for TrendDto {
 #[derive(Serialize)]
 struct TrendBucketDto {
     timestamp: String,
-    total_queries: i64,
-    blocked_queries: i64,
-    cache_hits: i64,
+    total_queries: String,
+    blocked_queries: String,
+    cache_hits: String,
 }
 
 impl TryFrom<TrendBucket> for TrendBucketDto {
@@ -291,10 +302,54 @@ impl TryFrom<TrendBucket> for TrendBucketDto {
     fn try_from(value: TrendBucket) -> Result<Self> {
         Ok(Self {
             timestamp: rfc3339(value.bucket_ms)?,
-            total_queries: value.total_queries,
-            blocked_queries: value.blocked_queries,
-            cache_hits: value.cache_hits,
+            total_queries: value.total_queries.to_string(),
+            blocked_queries: value.blocked_queries.to_string(),
+            cache_hits: value.cache_hits.to_string(),
         })
+    }
+}
+
+#[derive(Serialize)]
+struct RankingDto {
+    domain: String,
+    total_queries: String,
+    blocked_queries: String,
+    cache_hits: String,
+}
+
+impl From<Ranking> for RankingDto {
+    fn from(value: Ranking) -> Self {
+        Self {
+            domain: value.domain,
+            total_queries: value.total_queries.to_string(),
+            blocked_queries: value.blocked_queries.to_string(),
+            cache_hits: value.cache_hits.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UpstreamSnapshotDto {
+    id: String,
+    name: String,
+    group: &'static str,
+    samples: String,
+    successes: String,
+    failure_rate: f64,
+    avg_latency_ms: Option<f64>,
+}
+
+impl From<super::upstreams::UpstreamSnapshot> for UpstreamSnapshotDto {
+    fn from(value: super::upstreams::UpstreamSnapshot) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            group: value.group,
+            samples: value.samples.to_string(),
+            successes: value.successes.to_string(),
+            failure_rate: value.failure_rate,
+            avg_latency_ms: value.avg_latency_ms,
+        }
     }
 }
 
