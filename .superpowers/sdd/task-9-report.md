@@ -42,3 +42,17 @@
 
 - No Docker image build or container runtime smoke test was possible because the Docker CLI is unavailable.
 - No separate Node package-manager check exists: the repository has no `package.json`; direct `node --test` and `node --check` commands were run instead.
+
+## Review Follow-up
+
+- Corrected the ranking description to one top-20 domain list with per-domain total, blocked, and cache-hit counters; there is no separate blocked-domain ranking.
+- Made the unauthenticated exposure guidance explicit: restrict TCP 8080 to trusted networks with a firewall, with an authenticated reverse proxy as an optional additional control.
+- Clarified that mounting `/var/lib/dnsbuffer` alone does not persist the built-in relative database path. The mounted configuration must set `database_path = "/var/lib/dnsbuffer/dnsbuffer.db"`.
+- Removed assumptions about the distroless base image user. The Dockerfile does not override `USER`, and the volume must be writable by the image's actual runtime user.
+- Removed the task-generated untracked `dnsbuffer.db`, `dnsbuffer.db-shm`, and `dnsbuffer.db-wal` files from the worktree.
+- `rg -n "屏蔽域名排名|默认以 root|因此容器默认|防火墙|database_path = \"/var/lib/dnsbuffer/dnsbuffer.db\"|实际运行用户|域名前 20" README.md Dockerfile`
+  - Result: PASS. Required firewall, absolute database path, actual-user writability, and top-20 ranking text is present; the inaccurate blocked-ranking and root-user claims are absent.
+- `git diff --check`
+  - Result: PASS with no whitespace errors. Git emitted only Windows line-ending conversion notices.
+- `git status --short`
+  - Result before commit: only `README.md`, `Dockerfile`, and this report are modified; the three untracked SQLite smoke artifacts are absent.

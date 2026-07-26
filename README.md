@@ -39,7 +39,7 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 - 配置路径默认 `config.toml`（`-c` / `--config` 指定）
 - 日志级别在配置文件 `[log] level` 设置（默认 `info`）；`RUST_LOG` 环境变量优先，便于临时调试，如 `RUST_LOG=debug dnsbuffer ...`
 - 级别约定：启动信息（"dnsbuffer starting" / "listening on udp"）为 WARN，配置问题为 WARN，请求失败与重试/切换 fallback 等运行期波动为 INFO——设 `level = "warn"` 可只保留启动与配置告警
-- 仪表板默认访问地址为 `http://<主机IP>:8080/`。它没有认证；将 `[dashboard] listen` 设为 `0.0.0.0:8080` 会向所有可达网络暴露查询历史，只应在可信局域网中使用，或由带认证的反向代理保护
+- 仪表板默认访问地址为 `http://<主机IP>:8080/`。它没有认证；将 `[dashboard] listen` 设为 `0.0.0.0:8080` 会向所有可达网络暴露查询历史。应使用防火墙将 TCP 8080 限制到可信网段；如需额外访问控制，可选用带认证的反向代理
 - SQLite 数据库会在启动时创建并迁移；路径不可写、目录不存在或数据库初始化失败会使整个程序启动失败，DNS 服务也不会启动
 
 ## Docker
@@ -50,7 +50,7 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 docker pull ghcr.io/kagamir/dnsbuffer:latest
 ```
 
-镜像基于 distroless（无 shell，仅含运行所需的 glibc），默认以 root 运行以便绑定 53 端口，内置一份示例配置在 `/etc/dnsbuffer/config.toml`。生产环境请挂载自己的配置覆盖它：
+镜像基于 distroless（无 shell，仅含运行所需的 glibc），内置一份示例配置在 `/etc/dnsbuffer/config.toml`。生产环境请挂载自己的配置覆盖它：
 
 ```bash
 docker run -d --name dnsbuffer \
@@ -63,8 +63,8 @@ docker run -d --name dnsbuffer \
 ```
 
 - 配置中 `listen` 需为 `0.0.0.0:53`（容器内监听全部网卡），宿主侧用 `-p` 映射端口
-- 配置中 `[dashboard] database_path = "/var/lib/dnsbuffer/dnsbuffer.db"`，确保 SQLite 写入可持久化到宿主卷；挂载的 `/var/lib/dnsbuffer` 必须可由容器进程写入
-- 当前 Dockerfile 使用 distroless `cc-debian12` 且未设置 `USER`，因此容器默认以 root 运行，以便绑定 53 端口；这不改变持久卷必须可写的要求
+- 仅挂载 `/var/lib/dnsbuffer` 不会自动改变数据库位置；挂载的配置还必须显式设置 `[dashboard] database_path = "/var/lib/dnsbuffer/dnsbuffer.db"`，SQLite 才会持久化到该卷。内置配置使用相对路径 `dnsbuffer.db`，其位置取决于容器工作目录，不保证落在挂载卷中
+- 本 Dockerfile 没有覆盖基础镜像的 `USER`；挂载的 `/var/lib/dnsbuffer` 必须对镜像的实际运行用户可写，否则 SQLite 初始化失败会阻止程序启动
 - 临时调试可加 `-e RUST_LOG=debug`
 - 若挂载了远程规则源的本地文件（`[[adblock.rule_source]] path = ...`），一并 `-v` 进容器
 - 可用标签：`latest`、`vX.Y.Z`、`X.Y`（如 `v0.1.0`、`0.1`）
@@ -154,7 +154,7 @@ addr = "8.8.8.8:53"
 
 - **查询趋势**：按保留期展示总查询数、广告屏蔽数和缓存命中数；`retention_days` 为 1 至 15 天时按小时，16 天及以上按天，0（永久保留）固定展示最近 30 个日桶
 - **查询明细**：显示时间、查询域名、类型、响应码、耗时、屏蔽/缓存状态和响应 IP；搜索匹配查询域名或响应 IP，不搜索客户端 IP（dnsbuffer 不采集客户端 IP）
-- **域名排名**：按记录的查询次数排列域名，并分别展示屏蔽域名排名
+- **域名排名**：单个域名前 20 列表，按查询次数排序，并为每个域名附带总查询、屏蔽和缓存命中计数
 - **上游状态**：来自进程内滑动窗口，只反映最近样本的成功率和平均延迟，不是 SQLite 保留期内的历史汇总，重启后重新统计
 
 `retention_days` 默认是 7。设置为正数时，程序会定期清理早于该天数的查询明细及已结束的聚合桶；设置为 0 时不清理 SQLite 历史。`database_path` 的相对路径相对于 dnsbuffer 的进程工作目录，而不是配置文件所在目录。
