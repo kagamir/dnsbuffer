@@ -349,7 +349,7 @@ impl Store {
             )?;
             transaction.commit()?;
         }
-        validate_schema_v1(&conn)?;
+        validate_schema_v1(&mut conn)?;
         Ok(store)
     }
 
@@ -688,55 +688,53 @@ impl Store {
     fn read_connection(&self, deadline: Option<Instant>) -> Result<Connection> {
         let conn = self.connect()?;
         if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 bail!("dashboard database read deadline exceeded");
-            }
+            };
+            conn.busy_timeout(remaining)?;
             conn.progress_handler(1_000, Some(move || Instant::now() >= deadline));
         }
         Ok(conn)
     }
 }
 
-fn validate_schema_v1(conn: &Connection) -> Result<()> {
-    type RequiredColumn = (&'static str, &'static str, bool, bool);
+fn validate_schema_v1(conn: &mut Connection) -> Result<()> {
+    type RequiredColumn = (&'static str, &'static str, bool, i32);
     type RequiredTable = (&'static str, &'static [RequiredColumn]);
     let required_columns: [RequiredTable; 4] = [
         (
             "query_logs",
             &[
-                ("id", "INTEGER", false, true),
-                ("timestamp_ms", "INTEGER", true, false),
-                ("domain", "TEXT", true, false),
-                ("query_type", "TEXT", true, false),
-                ("response_code", "TEXT", true, false),
-                ("duration_ms", "INTEGER", true, false),
-                ("blocked", "INTEGER", true, false),
-                ("cache_hit", "INTEGER", true, false),
+                ("id", "INTEGER", false, 1),
+                ("timestamp_ms", "INTEGER", true, 0),
+                ("domain", "TEXT", true, 0),
+                ("query_type", "TEXT", true, 0),
+                ("response_code", "TEXT", true, 0),
+                ("duration_ms", "INTEGER", true, 0),
+                ("blocked", "INTEGER", true, 0),
+                ("cache_hit", "INTEGER", true, 0),
             ],
         ),
         (
             "query_response_ips",
-            &[
-                ("query_id", "INTEGER", true, true),
-                ("ip", "TEXT", true, true),
-            ],
+            &[("query_id", "INTEGER", true, 1), ("ip", "TEXT", true, 2)],
         ),
         (
             "query_hourly_stats",
             &[
-                ("bucket_ms", "INTEGER", false, true),
-                ("total_queries", "INTEGER", true, false),
-                ("blocked_queries", "INTEGER", true, false),
-                ("cache_hits", "INTEGER", true, false),
+                ("bucket_ms", "INTEGER", false, 1),
+                ("total_queries", "INTEGER", true, 0),
+                ("blocked_queries", "INTEGER", true, 0),
+                ("cache_hits", "INTEGER", true, 0),
             ],
         ),
         (
             "query_daily_stats",
             &[
-                ("bucket_ms", "INTEGER", false, true),
-                ("total_queries", "INTEGER", true, false),
-                ("blocked_queries", "INTEGER", true, false),
-                ("cache_hits", "INTEGER", true, false),
+                ("bucket_ms", "INTEGER", false, 1),
+                ("total_queries", "INTEGER", true, 0),
+                ("blocked_queries", "INTEGER", true, 0),
+                ("cache_hits", "INTEGER", true, 0),
             ],
         ),
     ];
@@ -756,20 +754,20 @@ fn validate_schema_v1(conn: &Connection) -> Result<()> {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, bool>(3)?,
-                    row.get::<_, i64>(5)? > 0,
+                    row.get::<_, i32>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (name, data_type, not_null, primary_key) in expected {
+        for (name, data_type, not_null, primary_key_ordinal) in expected {
             let Some(column) = columns.iter().find(|column| column.0 == *name) else {
                 bail!("database schema v1 table {table} is missing required column {name}");
             };
             if !column.1.eq_ignore_ascii_case(data_type)
                 || (*not_null && !column.2)
-                || (*primary_key && !column.3)
+                || column.3 != *primary_key_ordinal
             {
                 bail!(
-                    "database schema v1 column {table}.{name} must be {data_type} with the required NOT NULL/PRIMARY KEY constraints"
+                    "database schema v1 column {table}.{name} must be {data_type} with the required NOT NULL/PRIMARY KEY ordinal"
                 );
             }
         }
@@ -798,6 +796,7 @@ fn validate_schema_v1(conn: &Connection) -> Result<()> {
             "database schema v1 query_response_ips.query_id must reference query_logs.id ON DELETE CASCADE"
         );
     }
+    drop(foreign_keys);
 
     for (table, index, expected_columns) in [
         (
@@ -832,7 +831,47 @@ fn validate_schema_v1(conn: &Connection) -> Result<()> {
             );
         }
     }
+    validate_schema_behavior(conn)?;
     Ok(())
+}
+
+fn validate_schema_behavior(conn: &mut Connection) -> Result<()> {
+    let transaction = conn.transaction()?;
+    transaction.execute_batch("SAVEPOINT dashboard_schema_probe")?;
+    let result = (|| -> Result<()> {
+        transaction.execute(
+            "INSERT INTO query_logs (
+                timestamp_ms, domain, query_type, response_code, duration_ms, blocked, cache_hit
+             ) VALUES (0, 'schema-probe.invalid', 'A', 'NOERROR', 0, 0, 0)",
+            [],
+        )?;
+        let id = transaction.last_insert_rowid();
+        let stored_id: i64 =
+            transaction.query_row("SELECT id FROM query_logs WHERE rowid = ?1", [id], |row| {
+                row.get(0)
+            })?;
+        if stored_id != id {
+            bail!("database schema v1 query_logs.id must be an INTEGER PRIMARY KEY rowid alias");
+        }
+        transaction.execute(
+            "INSERT INTO query_response_ips(query_id, ip) VALUES (?1, '192.0.2.1')",
+            [id],
+        )?;
+        for table in ["query_hourly_stats", "query_daily_stats"] {
+            transaction.execute(
+                &format!(
+                    "INSERT INTO {table}(bucket_ms, total_queries, blocked_queries, cache_hits)
+                     VALUES(0, 1, 0, 0)
+                     ON CONFLICT(bucket_ms) DO UPDATE SET total_queries = total_queries + 1"
+                ),
+                [],
+            )?;
+        }
+        Ok(())
+    })();
+    transaction
+        .execute_batch("ROLLBACK TO dashboard_schema_probe; RELEASE dashboard_schema_probe;")?;
+    result.context("database schema v1 behavior probe failed")
 }
 
 fn bucket_start(timestamp_ms: i64, interval_ms: i64) -> Result<i64> {
@@ -1131,6 +1170,109 @@ mod tests {
 
         assert!(error.to_string().contains("query_logs_domain_idx"));
         assert!(error.to_string().contains("domain"));
+    }
+
+    fn create_custom_v1(name: &str, tables: &str) -> TestDatabase {
+        let path = std::env::temp_dir().join(format!(
+            "dnsbuffer-{name}-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let guard = TestDatabase(path);
+        let conn = Connection::open(guard.path()).unwrap();
+        conn.execute_batch(tables).unwrap();
+        conn.execute_batch(
+            "CREATE INDEX query_logs_time_idx ON query_logs(timestamp_ms DESC, id DESC);
+             CREATE INDEX query_logs_domain_idx ON query_logs(domain);
+             CREATE INDEX query_response_ips_ip_idx ON query_response_ips(ip);
+             PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        guard
+    }
+
+    fn remaining_schema_tables() -> &'static str {
+        "CREATE TABLE query_response_ips (
+            query_id INTEGER NOT NULL REFERENCES query_logs(id) ON DELETE CASCADE,
+            ip TEXT NOT NULL,
+            PRIMARY KEY(query_id, ip)
+         );
+         CREATE TABLE query_hourly_stats (
+            bucket_ms INTEGER PRIMARY KEY,
+            total_queries INTEGER NOT NULL,
+            blocked_queries INTEGER NOT NULL,
+            cache_hits INTEGER NOT NULL
+         );
+         CREATE TABLE query_daily_stats (
+            bucket_ms INTEGER PRIMARY KEY,
+            total_queries INTEGER NOT NULL,
+            blocked_queries INTEGER NOT NULL,
+            cache_hits INTEGER NOT NULL
+         );"
+    }
+
+    fn query_logs_table(primary_key: &str) -> String {
+        format!(
+            "CREATE TABLE query_logs (
+                id INTEGER {primary_key},
+                timestamp_ms INTEGER NOT NULL,
+                domain TEXT NOT NULL,
+                query_type TEXT NOT NULL,
+                response_code TEXT NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                blocked INTEGER NOT NULL,
+                cache_hit INTEGER NOT NULL
+             );"
+        )
+    }
+
+    #[test]
+    fn rejects_schema_v1_query_log_composite_primary_key() {
+        let mut schema = query_logs_table("");
+        schema = schema.replace(");", ", PRIMARY KEY(id, domain));");
+        schema.push_str(remaining_schema_tables());
+        let guard = create_custom_v1("schema-query-composite-pk", &schema);
+
+        assert!(Store::open(guard.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_schema_v1_composite_hourly_primary_key() {
+        let mut schema = query_logs_table("PRIMARY KEY");
+        schema.push_str(remaining_schema_tables());
+        schema = schema.replace(
+            "bucket_ms INTEGER PRIMARY KEY,\n            total_queries INTEGER NOT NULL,",
+            "bucket_ms INTEGER,\n            total_queries INTEGER NOT NULL,",
+        );
+        schema = schema.replacen(
+            "cache_hits INTEGER NOT NULL\n         );",
+            "cache_hits INTEGER NOT NULL, PRIMARY KEY(bucket_ms, total_queries)\n         );",
+            2,
+        );
+        let guard = create_custom_v1("schema-hour-composite-pk", &schema);
+
+        assert!(Store::open(guard.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_schema_v1_reversed_response_ip_primary_key() {
+        let mut schema = query_logs_table("PRIMARY KEY");
+        schema.push_str(
+            &remaining_schema_tables()
+                .replace("PRIMARY KEY(query_id, ip)", "PRIMARY KEY(ip, query_id)"),
+        );
+        let guard = create_custom_v1("schema-reversed-ip-pk", &schema);
+
+        assert!(Store::open(guard.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_schema_v1_descending_integer_primary_key_without_rowid_alias() {
+        let mut schema = query_logs_table("PRIMARY KEY DESC");
+        schema.push_str(remaining_schema_tables());
+        let guard = create_custom_v1("schema-desc-id-pk", &schema);
+
+        assert!(Store::open(guard.path()).is_err());
     }
 
     #[test]

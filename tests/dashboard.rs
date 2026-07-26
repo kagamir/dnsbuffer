@@ -703,6 +703,44 @@ async fn database_failures_return_sanitized_consistent_errors() {
 }
 
 #[tokio::test]
+async fn locked_database_returns_timeout_within_client_deadline_and_recovers() {
+    let (_guard, store) = test_store("db-lock-timeout").await;
+    let lock = store.connect().unwrap();
+    lock.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
+        .unwrap();
+    let permits = Arc::new(tokio::sync::Semaphore::new(4));
+    let app = router(HttpState {
+        store: Arc::new(store),
+        upstreams: UpstreamMetrics::default(),
+        retention_days: 7,
+        database_reads: permits.clone(),
+    });
+    let started = std::time::Instant::now();
+
+    let response = request(app.clone(), "/api/dashboard/queries").await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json(response).await,
+        serde_json::json!({"error": "dashboard database request timed out"})
+    );
+    assert!(started.elapsed() < std::time::Duration::from_millis(2_500));
+    lock.execute_batch("ROLLBACK").unwrap();
+    drop(lock);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while permits.available_permits() < 4 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        request(app, "/api/dashboard/queries").await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn serves_embedded_assets_and_method_errors() {
     let (_guard, store) = test_store("assets").await;
     let app = test_router(store);

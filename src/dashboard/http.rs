@@ -19,6 +19,13 @@ const DATABASE_TIMEOUT: &str = "dashboard database request timed out";
 pub const DATABASE_READ_CONCURRENCY: usize = 4;
 const DATABASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Debug)]
+enum DashboardReadError {
+    Timeout,
+    Database(anyhow::Error),
+    Join(tokio::task::JoinError),
+}
+
 #[derive(Clone)]
 pub struct HttpState {
     pub store: Arc<Store>,
@@ -172,19 +179,26 @@ where
     F: FnOnce(&Store, Instant) -> Result<T> + Send + 'static,
 {
     database_operation(permits, DATABASE_REQUEST_TIMEOUT, move |deadline| {
-        operation(&store, deadline)
+        operation(&store, deadline).map_err(|error| {
+            if let Some(sqlite) = error.downcast_ref::<rusqlite::Error>() {
+                classify_sqlite_error_ref(sqlite, Instant::now() >= deadline)
+            } else {
+                DashboardReadError::Database(error)
+            }
+        })
     })
     .await
+    .map_err(ApiError::from_read)
 }
 
 async fn database_operation<T, F>(
     permits: Arc<tokio::sync::Semaphore>,
     timeout: Duration,
     operation: F,
-) -> Result<T, ApiError>
+) -> Result<T, DashboardReadError>
 where
     T: Send + 'static,
-    F: FnOnce(Instant) -> Result<T> + Send + 'static,
+    F: FnOnce(Instant) -> Result<T, DashboardReadError> + Send + 'static,
 {
     let deadline = Instant::now() + timeout;
     let permit = tokio::time::timeout_at(
@@ -192,19 +206,43 @@ where
         permits.acquire_owned(),
     )
     .await
-    .map_err(|_| ApiError::database_timeout())?
-    .map_err(|_| ApiError::database(anyhow::anyhow!("database read limiter closed")))?;
-    let result = tokio::task::spawn_blocking(move || {
+    .map_err(|_| DashboardReadError::Timeout)?
+    .map_err(|_| DashboardReadError::Database(anyhow::anyhow!("database read limiter closed")))?;
+    let mut handle = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         operation(deadline)
-    })
-    .await
-    .context("dashboard database task failed")
-    .and_then(|result| result);
-    match result {
-        Ok(value) => Ok(value),
-        Err(error) if Instant::now() >= deadline => Err(ApiError::database_timeout_with(error)),
-        Err(error) => Err(ApiError::database(error)),
+    });
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), &mut handle).await {
+        Err(_) => Err(DashboardReadError::Timeout),
+        Ok(Err(error)) => Err(DashboardReadError::Join(error)),
+        Ok(Ok(result)) => result,
+    }
+}
+
+#[cfg(test)]
+fn classify_sqlite_error(error: rusqlite::Error, deadline_exhausted: bool) -> DashboardReadError {
+    classify_sqlite_error_ref(&error, deadline_exhausted)
+}
+
+fn classify_sqlite_error_ref(
+    error: &rusqlite::Error,
+    deadline_exhausted: bool,
+) -> DashboardReadError {
+    let timed_out = matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if deadline_exhausted
+                && matches!(
+                    code.code,
+                    rusqlite::ErrorCode::OperationInterrupted
+                        | rusqlite::ErrorCode::DatabaseBusy
+                        | rusqlite::ErrorCode::DatabaseLocked
+                )
+    );
+    if timed_out {
+        DashboardReadError::Timeout
+    } else {
+        DashboardReadError::Database(anyhow::Error::msg(error.to_string()))
     }
 }
 
@@ -398,9 +436,14 @@ impl ApiError {
         }
     }
 
-    fn database_timeout_with(error: anyhow::Error) -> Self {
-        tracing::warn!("dashboard database request timed out: {error:#}");
-        Self::database_timeout()
+    fn from_read(error: DashboardReadError) -> Self {
+        match error {
+            DashboardReadError::Timeout => Self::database_timeout(),
+            DashboardReadError::Database(error) => Self::database(error),
+            DashboardReadError::Join(error) => {
+                Self::database(anyhow::Error::new(error).context("dashboard database task failed"))
+            }
+        }
     }
 }
 
@@ -435,7 +478,7 @@ mod tests {
                 database_operation(permits, Duration::from_secs(1), move |_deadline| {
                     entered.fetch_add(1, Ordering::SeqCst);
                     release.wait();
-                    Ok(())
+                    Ok::<_, DashboardReadError>(())
                 })
                 .await
             }));
@@ -445,17 +488,79 @@ mod tests {
         }
 
         let fifth = database_operation(permits.clone(), Duration::from_millis(20), |_deadline| {
-            Ok(())
+            Ok::<_, DashboardReadError>(())
         })
         .await
         .unwrap_err();
 
-        assert_eq!(fifth.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(matches!(fifth, DashboardReadError::Timeout));
         assert_eq!(permits.available_permits(), 0);
         release.wait();
         for task in running {
             task.await.unwrap().unwrap();
         }
         assert_eq!(permits.available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn database_operation_returns_at_client_deadline_but_holds_permit_until_work_ends() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let worker_release = release.clone();
+
+        let error = database_operation(permits.clone(), Duration::from_millis(20), move |_| {
+            worker_release.wait();
+            Ok::<_, DashboardReadError>(())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, DashboardReadError::Timeout));
+        assert_eq!(permits.available_permits(), 0);
+        release.wait();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while permits.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn sqlite_error_classification_only_times_out_deadline_errors() {
+        let interrupted = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+            None,
+        );
+        let corrupt = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            None,
+        );
+
+        assert!(matches!(
+            classify_sqlite_error(interrupted, true),
+            DashboardReadError::Timeout
+        ));
+        assert!(matches!(
+            classify_sqlite_error(corrupt, true),
+            DashboardReadError::Database(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn blocking_task_join_failure_maps_to_database_500() {
+        let error = database_operation(
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            Duration::from_secs(1),
+            |_| -> Result<(), DashboardReadError> { panic!("join failure") },
+        )
+        .await
+        .unwrap_err();
+
+        let api = ApiError::from_read(error);
+
+        assert_eq!(api.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(api.client_message, DATABASE_ERROR);
     }
 }
