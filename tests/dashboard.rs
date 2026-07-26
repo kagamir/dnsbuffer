@@ -314,9 +314,9 @@ async fn serves_embedded_assets_and_method_errors() {
         "id=\"rankings\"",
         "id=\"upstreams\"",
         "id=\"queries\"",
-        "id=\"search\"",
-        "id=\"previous\"",
-        "id=\"next\"",
+        "id=\"query-search\"",
+        "id=\"previous-page\"",
+        "id=\"next-page\"",
         "src=\"/chart.js\"",
         "src=\"/app.js\"",
     ] {
@@ -358,4 +358,34 @@ async fn serves_embedded_assets_and_method_errors() {
         request(app, "/api/dashboard/not-found").await.status(),
         StatusCode::NOT_FOUND
     );
+}
+
+#[tokio::test]
+async fn embedded_frontend_contract() {
+    let (_guard, store) = test_store("frontend-contract").await;
+    let app = test_router(store);
+
+    let index = text(request(app.clone(), "/").await).await;
+    for marker in [
+        "id=\"trend-chart\"",
+        "id=\"upstream-list\"",
+        "id=\"ranking-body\"",
+        "id=\"query-search\"",
+        "id=\"query-body\"",
+        "id=\"previous-page\"",
+        "id=\"next-page\"",
+        "aria-label=",
+    ] {
+        assert!(index.contains(marker), "index missing {marker}");
+    }
+
+    let app_js = text(request(app, "/app.js").await).await;
+    for marker in [
+        "5000",
+        "AbortController",
+        "encodeURIComponent(state.search)",
+        "state.page = 1",
+    ] {
+        assert!(app_js.contains(marker), "app.js missing {marker}");
+    }
 }
