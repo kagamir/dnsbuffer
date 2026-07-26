@@ -57,3 +57,14 @@ Second review TDD evidence:
 - RED: the slow resolver test showed `run_udp_socket_until` returned while an accepted handler was still blocked.
 - RED: shutdown tests failed to compile until `run_until` accepted a fallible shutdown future.
 - GREEN: UDP drain and immediate writer flush tests pass.
+
+### Final Review Fix
+
+- External shutdown completion is stored as `First::Shutdown(Result<()>)`; both success and failure now trigger peer shutdown, bounded service drain, and writer shutdown before the original shutdown result is returned.
+- Named the outer service grace deadline and set it to 2500ms so the UDP server's internal two-second handler abort/reap phase can complete first.
+- Added a real shutdown-error regression test that queues a DNS event, returns an external shutdown error, verifies the original error, confirms the HTTP port closes, and checks the writer persisted the event after Runtime returns.
+
+Final review TDD evidence:
+
+- RED: the shutdown-error test hit its deadline because `?` returned from inside the `select!` branch before cleanup.
+- GREEN: the same test passes after preserving the shutdown result through cleanup.

@@ -393,6 +393,67 @@ async fn runtime_shutdown_flushes_a_responded_query_before_returning() {
     .expect("runtime writer drain test timed out");
 }
 
+#[tokio::test]
+async fn failed_shutdown_still_closes_services_and_flushes_the_writer() {
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+            let query = hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap();
+            let mut response = hickory_proto::op::Message::new(
+                query.metadata.id,
+                hickory_proto::op::MessageType::Response,
+                query.metadata.op_code,
+            );
+            response.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+            response.queries = query.queries;
+            upstream
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        let database = TestDatabase(std::env::temp_dir().join(format!(
+            "dnsbuffer-runtime-shutdown-error-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        )));
+        let mut config = runtime_config(database.path());
+        config.upstream = vec![dnsbuffer::config::UpstreamConfig::Plain {
+            addr: upstream_addr,
+        }];
+        let runtime = build_runtime(&config).await.unwrap();
+        let http_addr = runtime.http_addr();
+        let dns_addr = runtime.dns_addr();
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(runtime.run_until(async move {
+            let _ = shutdown_rx.await;
+            anyhow::bail!("shutdown listener failed")
+        }));
+
+        super_udp_query(dns_addr, "shutdown-error.example.").await;
+        shutdown.send(()).unwrap();
+        let error = running.await.unwrap().unwrap_err();
+
+        assert_eq!(error.to_string(), "shutdown listener failed");
+        assert!(tokio::net::TcpStream::connect(http_addr).await.is_err());
+        let path = database.path().to_owned();
+        let total = tokio::task::spawn_blocking(move || {
+            Store::open(&path)
+                .unwrap()
+                .queries(1, 10, None)
+                .unwrap()
+                .total
+        })
+        .await
+        .unwrap();
+        assert_eq!(total, 1);
+    })
+    .await
+    .expect("failed shutdown cleanup test timed out");
+}
+
 async fn super_udp_query(addr: std::net::SocketAddr, domain: &str) -> hickory_proto::op::Message {
     let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut query = hickory_proto::op::Message::query();

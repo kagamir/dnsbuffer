@@ -7,6 +7,8 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 
+const SERVICE_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2_500);
+
 pub struct Runtime {
     http_listener: tokio::net::TcpListener,
     http_state: http::HttpState,
@@ -120,7 +122,7 @@ impl Runtime {
         enum First {
             Http(std::io::Result<()>),
             Dns(Result<()>),
-            Shutdown,
+            Shutdown(Result<()>),
         }
         // Service failures win over a simultaneously-ready shutdown request; HTTP
         // wins the deterministic tie if both services finish together.
@@ -128,24 +130,21 @@ impl Runtime {
             biased;
             result = &mut http => First::Http(result),
             result = &mut dns => First::Dns(result),
-            result = &mut external_shutdown => {
-                result?;
-                First::Shutdown
-            },
+            result = &mut external_shutdown => First::Shutdown(result),
         };
         let _ = shutdown_tx.send(true);
         let wait_remaining = async {
             match &first {
                 First::Http(_) => dns.await.map_err(|error| anyhow::anyhow!(error)),
                 First::Dns(_) => http.await.map_err(|error| anyhow::anyhow!(error)),
-                First::Shutdown => {
+                First::Shutdown(_) => {
                     let (http_result, dns_result) = tokio::join!(http, dns);
                     http_result?;
                     dns_result
                 }
             }
         };
-        match tokio::time::timeout(std::time::Duration::from_secs(2), wait_remaining).await {
+        match tokio::time::timeout(SERVICE_SHUTDOWN_TIMEOUT, wait_remaining).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!("service shutdown failed: {error:#}"),
             Err(_) => tracing::warn!("service shutdown did not complete within 2s"),
@@ -156,7 +155,7 @@ impl Runtime {
                 service_result(result.map_err(anyhow::Error::from), "dashboard HTTP server")
             }
             First::Dns(result) => service_result(result, "DNS UDP server"),
-            First::Shutdown => Ok(()),
+            First::Shutdown(result) => result,
         }
     }
 }
