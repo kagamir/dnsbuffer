@@ -68,6 +68,7 @@ pub async fn build_runtime(config: &Config) -> Result<Runtime> {
             store: Arc::new(store),
             upstreams: built.upstream_metrics,
             retention_days: u64::from(config.dashboard.retention_days),
+            database_reads: Arc::new(tokio::sync::Semaphore::new(http::DATABASE_READ_CONCURRENCY)),
         },
         dns_socket,
         pipeline: built.pipeline,

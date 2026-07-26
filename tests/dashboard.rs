@@ -498,6 +498,7 @@ fn test_router_with_metrics(store: Store, upstreams: UpstreamMetrics) -> axum::R
         store: Arc::new(store),
         upstreams,
         retention_days: 7,
+        database_reads: Arc::new(tokio::sync::Semaphore::new(4)),
     })
 }
 
@@ -721,15 +722,15 @@ async fn serves_embedded_assets_and_method_errors() {
         "id=\"query-search\"",
         "id=\"previous-page\"",
         "id=\"next-page\"",
-        "src=\"/chart.js\"",
-        "src=\"/app.js\"",
+        "src=\"/assets/chart.js\"",
+        "src=\"/assets/app.js\"",
     ] {
         assert!(index.contains(marker), "index missing {marker}");
     }
 
     for (uri, content_type) in [
-        ("/style.css", "text/css; charset=utf-8"),
-        ("/app.js", "text/javascript; charset=utf-8"),
+        ("/assets/style.css", "text/css; charset=utf-8"),
+        ("/assets/app.js", "text/javascript; charset=utf-8"),
     ] {
         let response = request(app.clone(), uri).await;
         assert_eq!(response.status(), StatusCode::OK, "{uri}");
@@ -737,7 +738,7 @@ async fn serves_embedded_assets_and_method_errors() {
         let _body = text(response).await;
     }
 
-    let chart = request(app.clone(), "/chart.js").await;
+    let chart = request(app.clone(), "/assets/chart.js").await;
     assert_eq!(
         chart.headers()[header::CONTENT_TYPE],
         "text/javascript; charset=utf-8"
@@ -786,7 +787,7 @@ async fn embedded_frontend_contract() {
         assert!(index.contains(marker), "index missing {marker}");
     }
 
-    let app_js = text(request(app.clone(), "/app.js").await).await;
+    let app_js = text(request(app.clone(), "/assets/app.js").await).await;
     for marker in [
         "5000",
         "AbortController",
@@ -800,7 +801,7 @@ async fn embedded_frontend_contract() {
         assert!(app_js.contains(marker), "app.js missing {marker}");
     }
 
-    let chart_js = text(request(app, "/chart.js").await).await;
+    let chart_js = text(request(app, "/assets/chart.js").await).await;
     for marker in ["granularity", "setLineDash", "normalizeValue"] {
         assert!(chart_js.contains(marker), "chart.js missing {marker}");
     }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::extract::rejection::QueryRejection;
@@ -14,17 +15,24 @@ use super::store::{QueryPage, QueryRecord, Ranking, Store, TrendBucket, TrendRes
 use super::upstreams::UpstreamMetrics;
 
 const DATABASE_ERROR: &str = "dashboard database unavailable";
+const DATABASE_TIMEOUT: &str = "dashboard database request timed out";
+pub const DATABASE_READ_CONCURRENCY: usize = 4;
+const DATABASE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct HttpState {
     pub store: Arc<Store>,
     pub upstreams: UpstreamMetrics,
     pub retention_days: u64,
+    pub database_reads: Arc<tokio::sync::Semaphore>,
 }
 
 pub fn router(state: HttpState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/assets/style.css", get(style))
+        .route("/assets/chart.js", get(chart))
+        .route("/assets/app.js", get(app))
         .route("/style.css", get(style))
         .route("/chart.js", get(chart))
         .route("/app.js", get(app))
@@ -83,8 +91,8 @@ fn asset(content_type: &'static str, body: &'static str) -> Response {
 
 async fn trend(State(state): State<HttpState>) -> Result<Json<TrendDto>, ApiError> {
     let retention_days = state.retention_days;
-    let value = database_call(state.store, move |store| {
-        store.trend(retention_days, Utc::now().timestamp_millis())
+    let value = database_call(state.store, state.database_reads, move |store, deadline| {
+        store.trend_before(retention_days, Utc::now().timestamp_millis(), deadline)
     })
     .await?;
     Ok(Json(TrendDto::try_from(value).map_err(ApiError::database)?))
@@ -98,8 +106,13 @@ async fn queries(
     validate_query_encoding(raw_query.as_deref().unwrap_or_default())?;
     let Query(params) = params.map_err(|_| ApiError::bad_request("invalid query parameters"))?;
     let params = params.validate()?;
-    let value = database_call(state.store, move |store| {
-        store.queries(params.page, params.page_size, params.search.as_deref())
+    let value = database_call(state.store, state.database_reads, move |store, deadline| {
+        store.queries_before(
+            params.page,
+            params.page_size,
+            params.search.as_deref(),
+            deadline,
+        )
     })
     .await?;
     Ok(Json(
@@ -135,7 +148,12 @@ fn validate_query_encoding(query: &str) -> Result<(), ApiError> {
 }
 
 async fn rankings(State(state): State<HttpState>) -> Result<Json<Vec<Ranking>>, ApiError> {
-    Ok(Json(database_call(state.store, Store::rankings).await?))
+    Ok(Json(
+        database_call(state.store, state.database_reads, |store, deadline| {
+            store.rankings_before(deadline)
+        })
+        .await?,
+    ))
 }
 
 async fn upstreams(
@@ -144,16 +162,50 @@ async fn upstreams(
     Json(state.upstreams.snapshot())
 }
 
-async fn database_call<T, F>(store: Arc<Store>, operation: F) -> Result<T, ApiError>
+async fn database_call<T, F>(
+    store: Arc<Store>,
+    permits: Arc<tokio::sync::Semaphore>,
+    operation: F,
+) -> Result<T, ApiError>
 where
     T: Send + 'static,
-    F: FnOnce(&Store) -> Result<T> + Send + 'static,
+    F: FnOnce(&Store, Instant) -> Result<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || operation(&store))
-        .await
-        .context("dashboard database task failed")
-        .and_then(|result| result)
-        .map_err(ApiError::database)
+    database_operation(permits, DATABASE_REQUEST_TIMEOUT, move |deadline| {
+        operation(&store, deadline)
+    })
+    .await
+}
+
+async fn database_operation<T, F>(
+    permits: Arc<tokio::sync::Semaphore>,
+    timeout: Duration,
+    operation: F,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(Instant) -> Result<T> + Send + 'static,
+{
+    let deadline = Instant::now() + timeout;
+    let permit = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        permits.acquire_owned(),
+    )
+    .await
+    .map_err(|_| ApiError::database_timeout())?
+    .map_err(|_| ApiError::database(anyhow::anyhow!("database read limiter closed")))?;
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation(deadline)
+    })
+    .await
+    .context("dashboard database task failed")
+    .and_then(|result| result);
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if Instant::now() >= deadline => Err(ApiError::database_timeout_with(error)),
+        Err(error) => Err(ApiError::database(error)),
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -317,6 +369,7 @@ fn rfc3339(timestamp_ms: i64) -> Result<String> {
         .to_rfc3339_opts(SecondsFormat::AutoSi, true))
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     client_message: String,
@@ -337,6 +390,18 @@ impl ApiError {
             client_message: DATABASE_ERROR.into(),
         }
     }
+
+    fn database_timeout() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            client_message: DATABASE_TIMEOUT.into(),
+        }
+    }
+
+    fn database_timeout_with(error: anyhow::Error) -> Self {
+        tracing::warn!("dashboard database request timed out: {error:#}");
+        Self::database_timeout()
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -346,5 +411,51 @@ impl IntoResponse for ApiError {
             Json(serde_json::json!({ "error": self.client_message })),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn database_read_limit_queues_and_times_out_the_fifth_operation() {
+        let permits = Arc::new(tokio::sync::Semaphore::new(4));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(std::sync::Barrier::new(5));
+        let mut running = Vec::new();
+        for _ in 0..4 {
+            let permits = permits.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            running.push(tokio::spawn(async move {
+                database_operation(permits, Duration::from_secs(1), move |_deadline| {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    release.wait();
+                    Ok(())
+                })
+                .await
+            }));
+        }
+        while entered.load(Ordering::SeqCst) < 4 {
+            tokio::task::yield_now().await;
+        }
+
+        let fifth = database_operation(permits.clone(), Duration::from_millis(20), |_deadline| {
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(fifth.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(permits.available_permits(), 0);
+        release.wait();
+        for task in running {
+            task.await.unwrap().unwrap();
+        }
+        assert_eq!(permits.available_permits(), 4);
     }
 }

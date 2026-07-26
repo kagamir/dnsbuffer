@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -20,6 +21,39 @@ const BATCH_WAIT: Duration = Duration::from_millis(100);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 static STORE_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static WRITE_WARNING_LIMIT: WarningRateLimit = WarningRateLimit::new(Duration::from_secs(60));
+
+struct WarningRateLimit {
+    interval_ms: u64,
+    next_log_ms: AtomicU64,
+}
+
+impl WarningRateLimit {
+    const fn new(interval: Duration) -> Self {
+        Self {
+            interval_ms: interval.as_millis() as u64,
+            next_log_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn should_log(&self, now_ms: u64) -> bool {
+        let mut next = self.next_log_ms.load(Ordering::Relaxed);
+        loop {
+            if now_ms < next {
+                return false;
+            }
+            match self.next_log_ms.compare_exchange_weak(
+                next,
+                now_ms.saturating_add(self.interval_ms),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(value) => next = value,
+            }
+        }
+    }
+}
 
 pub struct StoreWorker {
     recorder: Option<Recorder>,
@@ -185,6 +219,7 @@ fn run_store_worker_with_interval(
         let Some(events) = events else { break };
         if !events.is_empty()
             && let Err(error) = store.insert_events(&events)
+            && WRITE_WARNING_LIMIT.should_log(monotonic_millis())
         {
             tracing::warn!(
                 count = events.len(),
@@ -201,6 +236,11 @@ fn run_store_worker_with_interval(
             break;
         }
     }
+}
+
+fn monotonic_millis() -> u64 {
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+    u64::try_from(STARTED.get_or_init(Instant::now).elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -309,6 +349,7 @@ impl Store {
             )?;
             transaction.commit()?;
         }
+        validate_schema_v1(&conn)?;
         Ok(store)
     }
 
@@ -403,34 +444,80 @@ impl Store {
     }
 
     pub fn trend(&self, retention_days: u64, now_ms: i64) -> Result<TrendResponse> {
+        self.trend_with_deadline(retention_days, now_ms, None)
+    }
+
+    pub fn trend_before(
+        &self,
+        retention_days: u64,
+        now_ms: i64,
+        deadline: Instant,
+    ) -> Result<TrendResponse> {
+        self.trend_with_deadline(retention_days, now_ms, Some(deadline))
+    }
+
+    fn trend_with_deadline(
+        &self,
+        retention_days: u64,
+        now_ms: i64,
+        deadline: Option<Instant>,
+    ) -> Result<TrendResponse> {
         DateTime::<Utc>::from_timestamp_millis(now_ms)
             .context("trend timestamp is out of range")?;
-        let (granularity, table, interval_ms, bucket_count) = match retention_days {
-            0 => ("day", "query_daily_stats", DAY_MS, 30_u64),
+        let (granularity, table, interval_ms, start_ms, end_ms) = match retention_days {
+            0 => {
+                let end_ms = bucket_start(now_ms, DAY_MS)?;
+                let start_ms = end_ms
+                    .checked_sub(29 * DAY_MS)
+                    .context("trend range is out of range")?;
+                ("day", "query_daily_stats", DAY_MS, start_ms, end_ms)
+            }
             1..=15 => (
                 "hour",
                 "query_hourly_stats",
                 HOUR_MS,
-                retention_days
-                    .checked_mul(24)
-                    .context("trend range is out of range")?,
+                bucket_start(
+                    now_ms
+                        .checked_sub(
+                            i64::try_from(retention_days)?
+                                .checked_mul(DAY_MS)
+                                .context("trend range is out of range")?,
+                        )
+                        .context("trend range is out of range")?,
+                    HOUR_MS,
+                )?,
+                bucket_start(now_ms, HOUR_MS)?,
             ),
-            days => ("day", "query_daily_stats", DAY_MS, days),
+            days => (
+                "day",
+                "query_daily_stats",
+                DAY_MS,
+                bucket_start(
+                    now_ms
+                        .checked_sub(
+                            i64::try_from(days)?
+                                .checked_mul(DAY_MS)
+                                .context("trend range is out of range")?,
+                        )
+                        .context("trend range is out of range")?,
+                    DAY_MS,
+                )?,
+                bucket_start(now_ms, DAY_MS)?,
+            ),
         };
+        let bucket_count = u64::try_from(
+            end_ms
+                .checked_sub(start_ms)
+                .context("trend range is out of range")?
+                .div_euclid(interval_ms),
+        )?
+        .checked_add(1)
+        .context("trend range is out of range")?;
         if bucket_count > MAX_TREND_BUCKETS {
             bail!("trend range exceeds maximum of {MAX_TREND_BUCKETS} buckets");
         }
-        let end_ms = bucket_start(now_ms, interval_ms)?;
-        let intervals =
-            i64::try_from(bucket_count.saturating_sub(1)).context("trend range is out of range")?;
-        let span_ms = intervals
-            .checked_mul(interval_ms)
-            .context("trend range is out of range")?;
-        let start_ms = end_ms
-            .checked_sub(span_ms)
-            .context("trend range is out of range")?;
         let capacity = usize::try_from(bucket_count).context("trend range is too large")?;
-        let conn = self.connect()?;
+        let conn = self.read_connection(deadline)?;
         let mut statement = conn.prepare(&format!(
             "SELECT bucket_ms, total_queries, blocked_queries, cache_hits
              FROM {table} WHERE bucket_ms BETWEEN ?1 AND ?2 ORDER BY bucket_ms"
@@ -479,6 +566,26 @@ impl Store {
     }
 
     pub fn queries(&self, page: u64, page_size: u64, search: Option<&str>) -> Result<QueryPage> {
+        self.queries_with_deadline(page, page_size, search, None)
+    }
+
+    pub fn queries_before(
+        &self,
+        page: u64,
+        page_size: u64,
+        search: Option<&str>,
+        deadline: Instant,
+    ) -> Result<QueryPage> {
+        self.queries_with_deadline(page, page_size, search, Some(deadline))
+    }
+
+    fn queries_with_deadline(
+        &self,
+        page: u64,
+        page_size: u64,
+        search: Option<&str>,
+        deadline: Option<Instant>,
+    ) -> Result<QueryPage> {
         if !(1..=MAX_QUERY_PAGE_SIZE).contains(&page_size) {
             bail!("query page size must be between 1 and {MAX_QUERY_PAGE_SIZE}");
         }
@@ -500,7 +607,7 @@ impl Store {
         } else {
             ""
         };
-        let conn = self.connect()?;
+        let conn = self.read_connection(deadline)?;
         let total_sql = format!("SELECT COUNT(*) FROM query_logs {filter}");
         let total: i64 = match &pattern {
             Some(pattern) => conn.query_row(&total_sql, [pattern], |row| row.get(0))?,
@@ -552,7 +659,15 @@ impl Store {
     }
 
     pub fn rankings(&self) -> Result<Vec<Ranking>> {
-        let conn = self.connect()?;
+        self.rankings_with_deadline(None)
+    }
+
+    pub fn rankings_before(&self, deadline: Instant) -> Result<Vec<Ranking>> {
+        self.rankings_with_deadline(Some(deadline))
+    }
+
+    fn rankings_with_deadline(&self, deadline: Option<Instant>) -> Result<Vec<Ranking>> {
+        let conn = self.read_connection(deadline)?;
         let mut statement = conn.prepare(
             "SELECT domain, COUNT(*), SUM(blocked), SUM(cache_hit)
              FROM query_logs GROUP BY domain
@@ -569,6 +684,137 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    fn read_connection(&self, deadline: Option<Instant>) -> Result<Connection> {
+        let conn = self.connect()?;
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                bail!("dashboard database read deadline exceeded");
+            }
+            conn.progress_handler(1_000, Some(move || Instant::now() >= deadline));
+        }
+        Ok(conn)
+    }
+}
+
+fn validate_schema_v1(conn: &Connection) -> Result<()> {
+    type RequiredColumn = (&'static str, &'static str, bool, bool);
+    type RequiredTable = (&'static str, &'static [RequiredColumn]);
+    let required_columns: [RequiredTable; 4] = [
+        (
+            "query_logs",
+            &[
+                ("id", "INTEGER", false, true),
+                ("timestamp_ms", "INTEGER", true, false),
+                ("domain", "TEXT", true, false),
+                ("query_type", "TEXT", true, false),
+                ("response_code", "TEXT", true, false),
+                ("duration_ms", "INTEGER", true, false),
+                ("blocked", "INTEGER", true, false),
+                ("cache_hit", "INTEGER", true, false),
+            ],
+        ),
+        (
+            "query_response_ips",
+            &[
+                ("query_id", "INTEGER", true, true),
+                ("ip", "TEXT", true, true),
+            ],
+        ),
+        (
+            "query_hourly_stats",
+            &[
+                ("bucket_ms", "INTEGER", false, true),
+                ("total_queries", "INTEGER", true, false),
+                ("blocked_queries", "INTEGER", true, false),
+                ("cache_hits", "INTEGER", true, false),
+            ],
+        ),
+        (
+            "query_daily_stats",
+            &[
+                ("bucket_ms", "INTEGER", false, true),
+                ("total_queries", "INTEGER", true, false),
+                ("blocked_queries", "INTEGER", true, false),
+                ("cache_hits", "INTEGER", true, false),
+            ],
+        ),
+    ];
+    for (table, expected) in required_columns {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            bail!("database schema v1 is missing required table {table}");
+        }
+        let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let columns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, i64>(5)? > 0,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (name, data_type, not_null, primary_key) in expected {
+            let Some(column) = columns.iter().find(|column| column.0 == *name) else {
+                bail!("database schema v1 table {table} is missing required column {name}");
+            };
+            if !column.1.eq_ignore_ascii_case(data_type)
+                || (*not_null && !column.2)
+                || (*primary_key && !column.3)
+            {
+                bail!(
+                    "database schema v1 column {table}.{name} must be {data_type} with the required NOT NULL/PRIMARY KEY constraints"
+                );
+            }
+        }
+    }
+
+    let mut foreign_keys = conn.prepare("PRAGMA foreign_key_list(query_response_ips)")?;
+    let has_cascade = foreign_keys
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .any(|(table, from, to, on_delete)| {
+            table == "query_logs"
+                && from == "query_id"
+                && to == "id"
+                && on_delete.eq_ignore_ascii_case("CASCADE")
+        });
+    if !has_cascade {
+        bail!(
+            "database schema v1 query_response_ips.query_id must reference query_logs.id ON DELETE CASCADE"
+        );
+    }
+
+    for (table, index) in [
+        ("query_logs", "query_logs_time_idx"),
+        ("query_logs", "query_logs_domain_idx"),
+        ("query_response_ips", "query_response_ips_ip_idx"),
+    ] {
+        let mut indexes = conn.prepare(&format!("PRAGMA index_list({table})"))?;
+        let exists = indexes
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == index);
+        if !exists {
+            bail!("database schema v1 is missing required index {index}");
+        }
+    }
+    Ok(())
 }
 
 fn bucket_start(timestamp_ms: i64, interval_ms: i64) -> Result<i64> {
@@ -607,7 +853,10 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use super::{QueryEvent, STORE_OPEN_LOCK, Store, StoreWorker, run_store_worker_with_interval};
+    use super::{
+        QueryEvent, STORE_OPEN_LOCK, Store, StoreWorker, WarningRateLimit,
+        run_store_worker_with_interval,
+    };
 
     const HOUR_MS: i64 = 3_600_000;
     const DAY_MS: i64 = 86_400_000;
@@ -756,6 +1005,97 @@ mod tests {
     }
 
     #[test]
+    fn rejects_schema_v1_without_tables() {
+        let path = std::env::temp_dir().join(format!(
+            "dnsbuffer-empty-v1-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let guard = TestDatabase(path);
+        Connection::open(guard.path())
+            .unwrap()
+            .pragma_update(None, "user_version", 1)
+            .unwrap();
+
+        let error = Store::open(guard.path()).unwrap_err();
+
+        assert!(error.to_string().contains("query_logs"));
+    }
+
+    #[test]
+    fn rejects_schema_v1_missing_response_ip_table() {
+        let (guard, store) = test_store("schema-missing-ip-table");
+        store
+            .connect()
+            .unwrap()
+            .execute("DROP TABLE query_response_ips", [])
+            .unwrap();
+        drop(store);
+
+        let error = Store::open(guard.path()).unwrap_err();
+
+        assert!(error.to_string().contains("query_response_ips"));
+    }
+
+    #[test]
+    fn rejects_schema_v1_missing_key_column() {
+        let (guard, store) = test_store("schema-missing-column");
+        let conn = store.connect().unwrap();
+        conn.execute("DROP TABLE query_daily_stats", []).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE query_daily_stats (
+                bucket_ms INTEGER PRIMARY KEY,
+                total_queries INTEGER NOT NULL,
+                blocked_queries INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        drop(conn);
+        drop(store);
+
+        let error = Store::open(guard.path()).unwrap_err();
+
+        assert!(error.to_string().contains("cache_hits"));
+    }
+
+    #[test]
+    fn rejects_schema_v1_with_incorrect_response_ip_foreign_key() {
+        let (guard, store) = test_store("schema-wrong-fk");
+        let conn = store.connect().unwrap();
+        conn.execute("DROP TABLE query_response_ips", []).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE query_response_ips (
+                query_id INTEGER NOT NULL REFERENCES query_logs(id),
+                ip TEXT NOT NULL,
+                PRIMARY KEY(query_id, ip)
+             );
+             CREATE INDEX query_response_ips_ip_idx ON query_response_ips(ip);",
+        )
+        .unwrap();
+        drop(conn);
+        drop(store);
+
+        let error = Store::open(guard.path()).unwrap_err();
+
+        assert!(error.to_string().contains("ON DELETE CASCADE"));
+    }
+
+    #[test]
+    fn rejects_schema_v1_missing_required_index() {
+        let (guard, store) = test_store("schema-missing-index");
+        store
+            .connect()
+            .unwrap()
+            .execute("DROP INDEX query_logs_domain_idx", [])
+            .unwrap();
+        drop(store);
+
+        let error = Store::open(guard.path()).unwrap_err();
+
+        assert!(error.to_string().contains("query_logs_domain_idx"));
+    }
+
+    #[test]
     fn cleanup_removes_expired_logs_and_ips_but_zero_keeps_all() {
         let (_guard, store) = test_store("cleanup");
         let now = 1_753_488_000_000;
@@ -796,6 +1136,43 @@ mod tests {
             now.div_euclid(DAY_MS) * DAY_MS - 29 * DAY_MS
         );
         assert_eq!(forever.buckets.len(), 30);
+    }
+
+    #[test]
+    fn finite_trend_includes_every_bucket_intersecting_the_retention_window() {
+        let (_guard, store) = test_store("trend-complete-window");
+        let non_aligned_now = 100 * DAY_MS + 12 * HOUR_MS + 34_567;
+
+        let hourly = store.trend(1, non_aligned_now).unwrap();
+        assert_eq!(hourly.buckets.len(), 25);
+        assert_eq!(hourly.start_ms, 99 * DAY_MS + 12 * HOUR_MS);
+        assert_eq!(hourly.end_ms, 100 * DAY_MS + 12 * HOUR_MS);
+
+        let daily = store.trend(16, non_aligned_now).unwrap();
+        assert_eq!(daily.buckets.len(), 17);
+        assert_eq!(daily.start_ms, 84 * DAY_MS);
+        assert_eq!(daily.end_ms, 100 * DAY_MS);
+    }
+
+    #[test]
+    fn aligned_finite_trend_includes_both_boundary_buckets() {
+        let (_guard, store) = test_store("trend-aligned-window");
+        let aligned_now = 100 * DAY_MS + 12 * HOUR_MS;
+
+        let hourly = store.trend(1, aligned_now).unwrap();
+        assert_eq!(hourly.buckets.len(), 25);
+        assert_eq!(hourly.start_ms, 99 * DAY_MS + 12 * HOUR_MS);
+        assert_eq!(hourly.end_ms, aligned_now);
+    }
+
+    #[test]
+    fn maximum_retention_fits_the_trend_bucket_limit() {
+        let (_guard, store) = test_store("trend-maximum-retention");
+        let now = 10_000 * DAY_MS + 123;
+
+        let trend = store.trend(9_999, now).unwrap();
+
+        assert_eq!(trend.buckets.len(), 10_000);
     }
 
     #[test]
@@ -869,6 +1246,50 @@ mod tests {
         assert!(store.queries(1, 0, None).is_err());
         assert!(store.queries(1, 201, None).is_err());
         assert!(store.queries(1, 200, None).is_ok());
+    }
+
+    #[test]
+    fn expired_read_deadline_interrupts_sqlite_query() {
+        let (_guard, store) = test_store("read-deadline");
+
+        let error = store
+            .queries_with_deadline(1, 50, Some("example"), Some(Instant::now()))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deadline"));
+    }
+
+    #[test]
+    fn search_schema_has_indexes_without_claiming_leading_wildcard_optimization() {
+        let (_guard, store) = test_store("search-index-plan");
+        let conn = store.connect().unwrap();
+        let indexes = [
+            "query_logs_time_idx",
+            "query_logs_domain_idx",
+            "query_response_ips_ip_idx",
+        ];
+        for index in indexes {
+            let exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing {index}");
+        }
+        let plan = conn
+            .prepare("EXPLAIN QUERY PLAN SELECT id FROM query_logs WHERE domain LIKE '%ample%'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("SCAN"),
+            "leading wildcard remains a scan: {plan}"
+        );
     }
 
     #[test]
@@ -1078,5 +1499,14 @@ mod tests {
 
         let store = Store::open(&path).unwrap();
         assert_eq!(store.queries(1, 10, None).unwrap().total, 0);
+    }
+
+    #[test]
+    fn repeated_write_warnings_are_rate_limited() {
+        let limiter = WarningRateLimit::new(Duration::from_secs(60));
+
+        assert!(limiter.should_log(1_000));
+        assert!(!limiter.should_log(1_001));
+        assert!(limiter.should_log(61_000));
     }
 }

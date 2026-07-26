@@ -236,6 +236,9 @@ impl Config {
         if self.dashboard.database_path.as_os_str().is_empty() {
             bail!("dashboard database_path must not be empty");
         }
+        if self.dashboard.retention_days > 9_999 {
+            bail!("dashboard retention_days must be between 0 and 9999");
+        }
         for b in &self.bootstrap.servers {
             if let UpstreamConfig::Doh { ip: None, url, .. } = b {
                 bail!("bootstrap doh {url} must specify ip (chicken-and-egg)");
@@ -520,6 +523,27 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dashboard_rejects_retention_above_9999_days() {
+        let text = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            [dashboard]
+            retention_days = 10000
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+
+        let error = cfg.validate().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "dashboard retention_days must be between 0 and 9999"
+        );
     }
 
     #[test]

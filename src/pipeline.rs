@@ -69,6 +69,7 @@ impl Pipeline {
     /// 处理单个查询，始终返回一个可回给客户端的响应报文。
     pub async fn handle(&self, query: &Message) -> Message {
         let started = Instant::now();
+        let started_at_ms = chrono::Utc::now().timestamp_millis();
         let Some(q) = query.queries.first() else {
             return servfail(query);
         };
@@ -110,7 +111,7 @@ impl Pipeline {
                 (response, false, false)
             }
         };
-        self.record_query(query, &response, started, blocked, cache_hit);
+        self.record_query(query, &response, started, started_at_ms, blocked, cache_hit);
         response
     }
 
@@ -119,6 +120,7 @@ impl Pipeline {
         query: &Message,
         response: &Message,
         started: Instant,
+        started_at_ms: i64,
         blocked: bool,
         cache_hit: bool,
     ) {
@@ -137,7 +139,7 @@ impl Pipeline {
         ips.sort();
         ips.dedup();
         self.recorder.try_record(QueryEvent {
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            timestamp_ms: started_at_ms,
             domain: q.name().to_string().trim_end_matches('.').to_lowercase(),
             query_type: q.query_type().to_string(),
             response_code: response_code_name(response.metadata.response_code),
@@ -239,6 +241,20 @@ mod tests {
         }
     }
 
+    struct DelayedResolver {
+        completed_at_ms: Arc<std::sync::atomic::AtomicI64>,
+    }
+
+    #[async_trait]
+    impl Resolver for DelayedResolver {
+        async fn resolve(&self, query: &Message) -> Result<Message> {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            self.completed_at_ms
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::SeqCst);
+            OkResolver.resolve(query).await
+        }
+    }
+
     /// 计数并返回一条 TTL 0 的 A 记录（NoError）——放入缓存后立即过期。
     struct CountingTtlZero(Arc<AtomicUsize>);
     #[async_trait]
@@ -316,6 +332,23 @@ mod tests {
         assert_eq!(event.response_code, "SERVFAIL");
         assert!(!event.blocked);
         assert!(!event.cache_hit);
+    }
+
+    #[tokio::test]
+    async fn event_timestamp_is_captured_before_resolver_completion() {
+        let completed_at_ms = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let before_handle_ms = chrono::Utc::now().timestamp_millis();
+        let (pipeline, mut events) = recording_parts(Arc::new(DelayedResolver {
+            completed_at_ms: completed_at_ms.clone(),
+        }));
+
+        pipeline.handle(&sample_query()).await;
+        let event = events.recv().await.unwrap();
+        let completed_at_ms = completed_at_ms.load(Ordering::SeqCst);
+
+        assert!(event.timestamp_ms >= before_handle_ms);
+        assert!(event.timestamp_ms < completed_at_ms);
+        assert!(event.duration_ms >= 20);
     }
 
     #[tokio::test]
