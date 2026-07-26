@@ -146,6 +146,7 @@ async fn runtime_exposes_prebound_ephemeral_addresses_and_shuts_down_cleanly() {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
     let running = tokio::spawn(runtime.run_until(async move {
         let _ = shutdown_rx.await;
+        Ok(())
     }));
 
     tokio::net::TcpStream::connect(http_addr).await.unwrap();
@@ -259,67 +260,137 @@ async fn http_get_json(addr: std::net::SocketAddr, path: &str) -> Value {
 
 #[tokio::test]
 async fn runtime_serves_dns_persists_to_http_and_drains_writer_on_shutdown() {
-    let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let upstream_addr = upstream.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buffer = [0; 4096];
-        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
-        let query = hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap();
-        let mut response = hickory_proto::op::Message::new(
-            query.metadata.id,
-            hickory_proto::op::MessageType::Response,
-            query.metadata.op_code,
-        );
-        response.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
-        response.queries = query.queries;
-        upstream
-            .send_to(&response.to_vec().unwrap(), peer)
-            .await
-            .unwrap();
-    });
-    let database = TestDatabase(std::env::temp_dir().join(format!(
-        "dnsbuffer-runtime-e2e-{}-{}.db",
-        std::process::id(),
-        rand::random::<u64>()
-    )));
-    assert!(!database.path().exists());
-    let mut config = runtime_config(database.path());
-    config.upstream = vec![dnsbuffer::config::UpstreamConfig::Plain {
-        addr: upstream_addr,
-    }];
-    let runtime = build_runtime(&config).await.unwrap();
-    let http_addr = runtime.http_addr();
-    let dns_addr = runtime.dns_addr();
-    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
-    let running = tokio::spawn(runtime.run_until(async move {
-        let _ = shutdown_rx.await;
-    }));
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+            let query = hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap();
+            let mut response = hickory_proto::op::Message::new(
+                query.metadata.id,
+                hickory_proto::op::MessageType::Response,
+                query.metadata.op_code,
+            );
+            response.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+            response.queries = query.queries;
+            upstream
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        let database = TestDatabase(std::env::temp_dir().join(format!(
+            "dnsbuffer-runtime-e2e-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        )));
+        assert!(!database.path().exists());
+        let mut config = runtime_config(database.path());
+        config.upstream = vec![dnsbuffer::config::UpstreamConfig::Plain {
+            addr: upstream_addr,
+        }];
+        let runtime = build_runtime(&config).await.unwrap();
+        let http_addr = runtime.http_addr();
+        let dns_addr = runtime.dns_addr();
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(runtime.run_until(async move {
+            let _ = shutdown_rx.await;
+            Ok(())
+        }));
 
-    let response = super_udp_query(dns_addr, "runtime.example.").await;
-    assert_eq!(
-        response.metadata.response_code,
-        hickory_proto::op::ResponseCode::NoError
-    );
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let queries = http_get_json(http_addr, "/api/dashboard/queries").await;
-        if queries["total"] == 1 {
-            assert_eq!(queries["records"][0]["domain"], "runtime.example");
-            break;
+        let response = super_udp_query(dns_addr, "runtime.example.").await;
+        assert_eq!(
+            response.metadata.response_code,
+            hickory_proto::op::ResponseCode::NoError
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let queries = http_get_json(http_addr, "/api/dashboard/queries").await;
+            if queries["total"] == 1 {
+                assert_eq!(queries["records"][0]["domain"], "runtime.example");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "query was not exposed by HTTP"
+            );
+            tokio::task::yield_now().await;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "query was not exposed by HTTP"
-        );
-        tokio::task::yield_now().await;
-    }
 
-    shutdown.send(()).unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), running)
+        shutdown.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), running)
+            .await
+            .expect("runtime shutdown timed out")
+            .unwrap()
+            .unwrap();
+    })
+    .await
+    .expect("runtime end-to-end test timed out");
+}
+
+#[tokio::test]
+async fn runtime_shutdown_flushes_a_responded_query_before_returning() {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+            let query = hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap();
+            let mut response = hickory_proto::op::Message::new(
+                query.metadata.id,
+                hickory_proto::op::MessageType::Response,
+                query.metadata.op_code,
+            );
+            response.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+            response.queries = query.queries;
+            upstream
+                .send_to(&response.to_vec().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        let database = TestDatabase(std::env::temp_dir().join(format!(
+            "dnsbuffer-runtime-flush-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        )));
+        let mut config = runtime_config(database.path());
+        config.upstream = vec![dnsbuffer::config::UpstreamConfig::Plain {
+            addr: upstream_addr,
+        }];
+        let runtime = build_runtime(&config).await.unwrap();
+        let dns_addr = runtime.dns_addr();
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let running = tokio::spawn(runtime.run_until(async move {
+            let _ = shutdown_rx.await;
+            Ok(())
+        }));
+
+        super_udp_query(dns_addr, "flush.example.").await;
+        shutdown.send(()).unwrap();
+        running.await.unwrap().unwrap();
+
+        let path = database.path().to_owned();
+        let (queries, total) = tokio::task::spawn_blocking(move || {
+            let store = Store::open(&path).unwrap();
+            let queries = store.queries(1, 10, None).unwrap();
+            let total = store
+                .trend(7, chrono::Utc::now().timestamp_millis())
+                .unwrap()
+                .buckets
+                .iter()
+                .map(|bucket| bucket.total_queries)
+                .sum::<i64>();
+            (queries, total)
+        })
         .await
-        .expect("runtime shutdown timed out")
-        .unwrap()
         .unwrap();
+        assert_eq!(queries.total, 1);
+        assert_eq!(queries.records[0].domain, "flush.example");
+        assert_eq!(total, 1);
+    })
+    .await
+    .expect("runtime writer drain test timed out");
 }
 
 async fn super_udp_query(addr: std::net::SocketAddr, domain: &str) -> hickory_proto::op::Message {

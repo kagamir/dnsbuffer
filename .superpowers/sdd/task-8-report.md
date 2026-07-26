@@ -42,3 +42,18 @@ Review verification:
 - `cargo test --test dashboard -- --nocapture`: 13 passed, 0 failed.
 - `cargo test --test forwarding -- --nocapture`: 5 passed, 0 failed.
 - `cargo test -- --nocapture`: 137 passed, 0 failed.
+
+### Second Review Fixes
+
+- UDP query handlers are tracked in a `JoinSet`; shutdown and receive errors stop new reads, drain accepted handlers for up to two seconds, then abort and reap any remainder.
+- Runtime selection is biased so ready HTTP/DNS results take precedence over external shutdown, with HTTP first for simultaneous service completion.
+- `run_until` now accepts a shutdown future returning `Result<()>`, allowing Ctrl-C listener failures to propagate.
+- Runtime E2E network activity is bounded by a two-second timeout.
+- Added a writer-drain integration test that shuts down immediately after the DNS response, waits for Runtime to return, then reopens SQLite and verifies query details and aggregate persistence.
+- Documented the Runtime consumption contract: coordinated cleanup requires `run` or `run_until`.
+
+Second review TDD evidence:
+
+- RED: the slow resolver test showed `run_udp_socket_until` returned while an accepted handler was still blocked.
+- RED: shutdown tests failed to compile until `run_until` accepted a fallible shutdown future.
+- GREEN: UDP drain and immediate writer flush tests pass.

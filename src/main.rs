@@ -30,9 +30,9 @@ async fn main() -> Result<()> {
     dashboard::build_runtime(&cfg)
         .await?
         .run_until(async {
-            if let Err(error) = tokio::signal::ctrl_c().await {
-                tracing::warn!("failed to listen for shutdown signal: {error}");
-            }
+            tokio::signal::ctrl_c()
+                .await
+                .context("failed to listen for shutdown signal")
         })
         .await
 }

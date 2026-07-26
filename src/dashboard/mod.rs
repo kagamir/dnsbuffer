@@ -87,12 +87,14 @@ impl Runtime {
     }
 
     pub async fn run(self) -> Result<()> {
-        self.run_until(std::future::pending()).await
+        self.run_until(std::future::pending::<Result<()>>()).await
     }
 
+    /// Runs both bound services and performs coordinated shutdown. Callers should
+    /// consume a built runtime through `run` or `run_until`, rather than dropping it.
     pub async fn run_until<F>(self, external_shutdown: F) -> Result<()>
     where
-        F: std::future::Future<Output = ()>,
+        F: std::future::Future<Output = Result<()>>,
     {
         let Runtime {
             http_listener,
@@ -120,10 +122,16 @@ impl Runtime {
             Dns(Result<()>),
             Shutdown,
         }
+        // Service failures win over a simultaneously-ready shutdown request; HTTP
+        // wins the deterministic tie if both services finish together.
         let first = tokio::select! {
+            biased;
             result = &mut http => First::Http(result),
             result = &mut dns => First::Dns(result),
-            () = &mut external_shutdown => First::Shutdown,
+            result = &mut external_shutdown => {
+                result?;
+                First::Shutdown
+            },
         };
         let _ = shutdown_tx.send(true);
         let wait_remaining = async {
