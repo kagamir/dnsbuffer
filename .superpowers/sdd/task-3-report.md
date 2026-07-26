@@ -61,3 +61,69 @@ Result: 11 passed, 0 failed, 88 filtered out for the library tests; all other in
 ## Commit
 
 Pending at report creation; the final commit hash is reported in the final response and Git history.
+
+## Review Fix: Bounded Read Queries
+
+### Scope and Root Cause
+
+- `Store::trend` checked whether bucket arithmetic fit integer types but did not apply a resource bound before `Vec::with_capacity`. An arithmetically valid large retention could therefore allocate or iterate an unsafe number of buckets.
+- `Store::queries` converted any `u64` page size to a SQL limit without enforcing the specified 1-200 storage-layer range. A large returned page could also make the second IP query exceed SQLite's bind parameter limit.
+- The prior panic-boundary test asserted only the outer `catch_unwind` result, so a non-panicking but incorrect successful inner result was not detected.
+
+### RED Evidence
+
+Tests were changed before production code to add:
+
+- `queries_reject_zero_or_oversized_page_sizes`, covering 0, 201, and the valid boundary 200.
+- `trend_rejects_huge_but_arithmetically_valid_ranges_without_panicking`, using 100,000 daily buckets and asserting outer `Ok` plus inner `Err`.
+- Stronger `time_boundary_inputs_return_errors_instead_of_panicking` assertions for every outer and inner result.
+
+Command:
+
+```text
+cargo test dashboard::store::tests -- --nocapture
+```
+
+Observed result: 10 passed, 3 failed. The failures showed that page size 0 was accepted, the huge valid trend returned `Ok`, and `trend(1, i64::MAX)` returned `Ok` rather than an error. These were the expected missing-validation failures.
+
+### GREEN Evidence
+
+Minimal production changes:
+
+- Added `MAX_TREND_BUCKETS = 10_000`, allowing roughly 27 years of daily data while bounding response allocation and iteration. The limit is checked before time-range work, database access, or allocation.
+- Added `MAX_QUERY_PAGE_SIZE = 200` and reject page sizes outside `1..=200` before offset calculation or database access.
+- Validate `now_ms` with `DateTime::<Utc>::from_timestamp_millis` so unsupported extreme timestamps return errors consistently.
+- The huge-range regression uses `now_ms = 0`, ensuring its error comes from the bucket limit rather than timestamp validation.
+
+Fresh specified command:
+
+```text
+cargo test dashboard::store::tests -- --nocapture
+```
+
+Result: 13 passed, 0 failed, 88 filtered out; all invoked binaries had 0 failures.
+
+Fresh full command:
+
+```text
+cargo test
+```
+
+Result: 101 unit tests and 5 integration tests passed, 0 failed; doc tests had 0 failures.
+
+### Self-Review
+
+- The trend bucket limit is applied to the final bucket count for every granularity and precedes `Vec::with_capacity`.
+- Normal trend behavior remains unchanged: 1-15 days produce at most 360 hourly buckets, retention 0 produces 30 daily buckets, and ordinary multi-year daily retention remains accepted below 10,000 days.
+- A maximum page of 200 records produces at most 200 bind parameters in the IP query; invalid sizes fail before SQL execution.
+- Boundary tests now prove both no unwind and a returned application error.
+- Only `src/dashboard/store.rs` and this required report were changed.
+
+### Review Fix Commit
+
+Pending at report update; the final commit hash is reported in the final response and Git history.
+
+### Remaining Concerns
+
+- The 10,000-bucket API bound is deliberately independent of product retention configuration: data may be retained longer, but one trend response cannot request more than 10,000 buckets.
+- Cargo continues to emit the external user-level deprecation warning for `C:\\Users\\user\\.cargo\\config`; it is unrelated to this task.

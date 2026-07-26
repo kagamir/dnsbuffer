@@ -10,6 +10,8 @@ use super::QueryEvent;
 const SCHEMA_VERSION: i64 = 1;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
+const MAX_TREND_BUCKETS: u64 = 10_000;
+const MAX_QUERY_PAGE_SIZE: u64 = 200;
 
 #[derive(Debug, serde::Serialize)]
 pub struct TrendResponse {
@@ -203,6 +205,8 @@ impl Store {
     }
 
     pub fn trend(&self, retention_days: u64, now_ms: i64) -> Result<TrendResponse> {
+        DateTime::<Utc>::from_timestamp_millis(now_ms)
+            .context("trend timestamp is out of range")?;
         let (granularity, table, interval_ms, bucket_count) = match retention_days {
             0 => ("day", "query_daily_stats", DAY_MS, 30_u64),
             1..=15 => (
@@ -215,6 +219,9 @@ impl Store {
             ),
             days => ("day", "query_daily_stats", DAY_MS, days),
         };
+        if bucket_count > MAX_TREND_BUCKETS {
+            bail!("trend range exceeds maximum of {MAX_TREND_BUCKETS} buckets");
+        }
         let end_ms = bucket_start(now_ms, interval_ms)?;
         let intervals =
             i64::try_from(bucket_count.saturating_sub(1)).context("trend range is out of range")?;
@@ -274,6 +281,9 @@ impl Store {
     }
 
     pub fn queries(&self, page: u64, page_size: u64, search: Option<&str>) -> Result<QueryPage> {
+        if !(1..=MAX_QUERY_PAGE_SIZE).contains(&page_size) {
+            bail!("query page size must be between 1 and {MAX_QUERY_PAGE_SIZE}");
+        }
         let page = page.max(1);
         let offset = page
             .checked_sub(1)
@@ -653,6 +663,15 @@ mod tests {
     }
 
     #[test]
+    fn queries_reject_zero_or_oversized_page_sizes() {
+        let (_guard, store) = test_store("query-page-size");
+
+        assert!(store.queries(1, 0, None).is_err());
+        assert!(store.queries(1, 201, None).is_err());
+        assert!(store.queries(1, 200, None).is_ok());
+    }
+
+    #[test]
     fn rankings_return_top_20_with_stable_ties_and_counters() {
         let (_guard, store) = test_store("rankings");
         let now = 1_753_488_000_000;
@@ -685,8 +704,25 @@ mod tests {
     fn time_boundary_inputs_return_errors_instead_of_panicking() {
         let (_guard, store) = test_store("time-boundaries");
 
-        assert!(std::panic::catch_unwind(|| store.cleanup(u64::MAX, i64::MIN)).is_ok());
-        assert!(std::panic::catch_unwind(|| store.trend(1, i64::MIN)).is_ok());
-        assert!(std::panic::catch_unwind(|| store.trend(1, i64::MAX)).is_ok());
+        let cleanup = std::panic::catch_unwind(|| store.cleanup(u64::MAX, i64::MIN));
+        assert!(cleanup.is_ok());
+        assert!(cleanup.unwrap().is_err());
+
+        let minimum = std::panic::catch_unwind(|| store.trend(1, i64::MIN));
+        assert!(minimum.is_ok());
+        assert!(minimum.unwrap().is_err());
+
+        let maximum = std::panic::catch_unwind(|| store.trend(1, i64::MAX));
+        assert!(maximum.is_ok());
+        assert!(maximum.unwrap().is_err());
+    }
+
+    #[test]
+    fn trend_rejects_huge_but_arithmetically_valid_ranges_without_panicking() {
+        let (_guard, store) = test_store("trend-allocation-boundary");
+
+        let result = std::panic::catch_unwind(|| store.trend(100_000, 0));
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
     }
 }
