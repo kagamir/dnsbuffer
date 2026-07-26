@@ -10,16 +10,16 @@
 }(typeof window !== "undefined" ? window : globalThis, function () {
   "use strict";
 
-  function parseCount(value) {
-    return typeof value === "string" && /^\d+$/.test(value) ? BigInt(value) : 0n;
+  function normalizeCount(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
   }
 
   function queryResponseDecision(requestedPage, currentPage, pageSize, total, corrected) {
-    const totalPages = (parseCount(total) + BigInt(pageSize) - 1n) / BigInt(pageSize) || 1n;
+    const totalPages = Math.max(1, Math.ceil(normalizeCount(total) / pageSize));
     if (requestedPage !== currentPage) return { page: currentPage, totalPages, action: "ignore" };
-    if (BigInt(requestedPage) <= totalPages) return { page: requestedPage, totalPages, action: "render" };
-    const page = Number(totalPages);
-    return { page, totalPages, action: corrected ? "reject" : "retry" };
+    if (requestedPage <= totalPages) return { page: requestedPage, totalPages, action: "render" };
+    return { page: totalPages, totalPages, action: corrected ? "reject" : "retry" };
   }
 
   function applyQueryResponse(state, requestedPage, pageSize, total, corrected) {
@@ -35,7 +35,7 @@
   function paginationControls(page, totalPages, loading) {
     return {
       previous: !loading && page > 1,
-      next: !loading && (totalPages == null || BigInt(page) < totalPages)
+      next: !loading && (totalPages == null || page < totalPages)
     };
   }
 
@@ -52,27 +52,35 @@
     let results = new Map();
     return {
       begin() { activeId += 1; results = new Map(); return activeId; },
-      record(id, name, success) {
+      record(id, name, result) {
         if (id !== activeId || !names.includes(name)) return null;
-        results.set(name, success);
+        results.set(name, result);
         const complete = results.size === names.length;
-        const failed = [...results.values()].filter((result) => !result).length;
-        return { id, complete, success: complete && failed === 0, failed };
+        const failed = [...results.values()].filter((value) => value === "failure" || value === false).length;
+        const superseded = [...results.values()].filter((value) => value === "superseded").length;
+        return { id, complete, success: complete && failed === 0 && superseded === 0, failed, superseded };
       }
     };
   }
 
+  function classifyRegionResult({ aborted, current, failed }) {
+    if (aborted || !current) return "superseded";
+    return failed ? "failure" : "success";
+  }
+
   function upstreamStatus(upstream) {
-    const samples = parseCount(upstream.samples);
-    const successes = parseCount(upstream.successes);
+    const samples = normalizeCount(upstream.samples);
+    const successes = normalizeCount(upstream.successes);
     const failureRate = Math.max(0, Number(upstream.failure_rate) || 0);
-    if (samples === 0n) return { text: "暂无数据", kind: "neutral" };
-    if (successes === 0n) return { text: "不可用", kind: "bad" };
+    if (samples === 0) return { text: "暂无数据", kind: "neutral" };
+    if (successes === 0) return { text: "不可用", kind: "bad" };
     if (failureRate > 0 || successes < samples) return { text: "有失败", kind: "warn" };
     return { text: "正常", kind: "good" };
   }
 
   function start() {
+    if (start.started) return;
+    start.started = true;
     const state = {
       page: 1, pageSize: 50, search: "", controllers: new Map(),
       queryLoading: false, totalPages: null, requestedPage: 1, trendData: null,
@@ -116,7 +124,7 @@
       if (!result?.complete) return;
       const status = document.querySelector("#refresh-status");
       const dot = document.querySelector(".status-dot");
-      status.textContent = result.success ? "全部区域已更新" : `${result.failed} 个区域更新失败`;
+      status.textContent = result.success ? "全部区域已更新" : result.failed ? `${result.failed} 个区域更新失败` : "部分区域已被新请求替代";
       if (result.success) {
         status.removeAttribute("aria-live");
         dot.className = "status-dot";
@@ -134,15 +142,16 @@
         const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        if (state.controllers.get(name) !== controller) return false;
+        if (state.controllers.get(name) !== controller) return "superseded";
         await render(data);
         setError(name, "");
-        return true;
+        return "success";
       } catch (error) {
-        if (error.name !== "AbortError") {
+        const result = classifyRegionResult({ aborted: error.name === "AbortError", current: state.controllers.get(name) === controller, failed: true });
+        if (result === "failure") {
           setError(name, "更新失败，正在保留上次数据");
         }
-        return false;
+        return result;
       } finally {
         if (state.controllers.get(name) === controller) state.controllers.delete(name);
       }
@@ -157,11 +166,11 @@
       window.DnsTrendChart.render(document.querySelector("#trend-chart"), buckets, data.granularity);
       document.querySelector("#trend-range").textContent = `${aggregation} · ${start.toLocaleString()} 至 ${end.toLocaleString()}`;
       const totals = buckets.reduce((sum, bucket) => ({
-        total: sum.total + window.DnsTrendChart.parseCount(bucket.total_queries),
-        blocked: sum.blocked + window.DnsTrendChart.parseCount(bucket.blocked_queries),
-        cache: sum.cache + window.DnsTrendChart.parseCount(bucket.cache_hits)
-      }), { total: 0n, blocked: 0n, cache: 0n });
-      document.querySelector("#trend-summary").textContent = `${aggregation}，共 ${window.DnsTrendChart.exactCount(totals.total)} 次查询，${window.DnsTrendChart.exactCount(totals.blocked)} 次屏蔽，${window.DnsTrendChart.exactCount(totals.cache)} 次缓存命中`;
+        total: sum.total + window.DnsTrendChart.normalizeValue(bucket.total_queries),
+        blocked: sum.blocked + window.DnsTrendChart.normalizeValue(bucket.blocked_queries),
+        cache: sum.cache + window.DnsTrendChart.normalizeValue(bucket.cache_hits)
+      }), { total: 0, blocked: 0, cache: 0 });
+      document.querySelector("#trend-summary").textContent = `${aggregation}，共 ${window.DnsTrendChart.formatCount(totals.total)} 次查询，${window.DnsTrendChart.formatCount(totals.blocked)} 次屏蔽，${window.DnsTrendChart.formatCount(totals.cache)} 次缓存命中`;
     }
     function renderUpstreams(data) {
       const target = document.querySelector("#upstream-list");
@@ -206,7 +215,7 @@
         if (record.blocked) addBadge(result, "已屏蔽", "badge-blocked"); if (record.cache_hit) addBadge(result, "缓存", "badge-cache");
         row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, element("td", `${record.duration_ms} ms`), result); return row;
       }));
-      document.querySelector("#page-status").textContent = `第 ${state.page} / ${state.totalPages} 页 · ${parseCount(data.total)} 条`;
+      document.querySelector("#page-status").textContent = `第 ${state.page} / ${state.totalPages} 页 · ${window.DnsTrendChart.formatCount(data.total)} 条`;
       updatePagination();
     }
     async function loadQueries(corrected, roundId) {
@@ -221,10 +230,10 @@
         action = decision.action;
         if (action === "render") renderQueries(data);
       });
-      if (success && action === "retry") return loadQueries(true, roundId);
-      if (success && action === "reject") setError("queries", "数据总数连续变化，已保留上次查询结果");
+      if (success === "success" && action === "retry") return loadQueries(true, roundId);
+      if (success === "success" && action === "reject") setError("queries", "数据总数连续变化，已保留上次查询结果");
       if (mayFinishQuery(requestId, state.queryRequestId)) setQueryLoading(false);
-      return success && action === "render";
+      return success === "success" && action === "render" ? "success" : success;
     }
     function refreshAll() {
       const roundId = roundTracker.begin();
@@ -235,9 +244,9 @@
         ["rankings", loadRegion("rankings", "/api/dashboard/rankings", renderRankings)],
         ["queries", loadQueries(false, roundId)]
       ];
-      return Promise.allSettled(requests.map(([name, request]) => request.then((success) => {
-        finishRefreshStatus(roundTracker.record(roundId, name, success));
-        return success;
+      return Promise.allSettled(requests.map(([name, request]) => request.then((result) => {
+        finishRefreshStatus(roundTracker.record(roundId, name, result));
+        return result;
       })));
     }
     let searchTimer;
@@ -254,5 +263,5 @@
     updatePagination(); refreshAll(); window.setInterval(refreshAll, 5000);
   }
 
-  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, upstreamStatus };
+  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, upstreamStatus };
 }));

@@ -13,23 +13,16 @@
     { key: "cache_hits", color: "#fbbf24", dash: [2, 4] }
   ];
 
-  function parseCount(value) {
-    if (typeof value === "bigint") return value >= 0n ? value : 0n;
-    if (typeof value !== "string" || !/^\d+$/.test(value)) return 0n;
-    return BigInt(value);
+  function normalizeValue(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : 0;
   }
 
   function formatCount(value) {
-    const count = parseCount(value);
-    if (count < 1000n) return count.toString();
-    const unit = count >= 1000000n ? 1000000n : 1000n;
-    const suffix = unit === 1000000n ? "M" : "K";
-    const tenths = count * 10n / unit;
-    return `${tenths / 10n}${tenths % 10n === 0n ? "" : `.${tenths % 10n}`}${suffix}`;
-  }
-
-  function exactCount(value) {
-    return parseCount(value).toString();
+    const number = normalizeValue(value);
+    if (number >= 1000000) return `${Number((number / 1000000).toFixed(1))}M`;
+    if (number >= 1000) return `${Number((number / 1000).toFixed(1))}K`;
+    return String(Math.round(number));
   }
 
   function formatBucketLabel(timestamp, granularity, locale) {
@@ -59,11 +52,8 @@
       return;
     }
 
-    const maximum = buckets.reduce((max, bucket) => {
-      const count = parseCount(bucket.total_queries);
-      return count > max ? count : max;
-    }, 1n);
-    const topTick = maximum * 108n / 100n || 1n;
+    const maximum = Math.max(1, ...buckets.map((bucket) => normalizeValue(bucket.total_queries)));
+    const topTick = maximum * 1.08;
     const widestTick = context.measureText(formatCount(topTick)).width;
     const inset = { top: 18, right: 10, bottom: 38, left: Math.ceil(widestTick) + 15 };
     const plotWidth = Math.max(1, width - inset.left - inset.right);
@@ -81,14 +71,11 @@
       context.lineTo(width - inset.right, y);
       context.stroke();
       context.fillStyle = "#8793a8";
-      context.fillText(formatCount(topTick * BigInt(4 - line) / 4n), inset.left - 7, y);
+      context.fillText(formatCount(topTick * (4 - line) / 4), inset.left - 7, y);
     }
 
     const xAt = (index) => inset.left + (buckets.length === 1 ? plotWidth / 2 : plotWidth * index / (buckets.length - 1));
-    const yAt = (value) => {
-      const scaled = Number(parseCount(value) * 1000000n / topTick) / 1000000;
-      return inset.top + plotHeight - scaled * plotHeight;
-    };
+    const yAt = (value) => inset.top + plotHeight - (normalizeValue(value) / topTick * plotHeight);
     context.textBaseline = "top";
     context.fillStyle = "#8793a8";
     [...new Set([0, Math.floor((buckets.length - 1) / 2), buckets.length - 1])].forEach((index) => {
@@ -113,5 +100,5 @@
     context.setLineDash([]);
   }
 
-  return { render, parseCount, formatCount, exactCount, formatBucketLabel, series };
+  return { render, normalizeValue, formatCount, formatBucketLabel, series };
 }));
