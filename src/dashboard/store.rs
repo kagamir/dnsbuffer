@@ -75,7 +75,11 @@ impl StoreWorker {
             .as_ref()
             .is_some_and(|stopped| stopped.recv_timeout(SHUTDOWN_TIMEOUT).is_ok())
         {
-            if self.thread.take().is_some_and(|thread| thread.join().is_err()) {
+            if self
+                .thread
+                .take()
+                .is_some_and(|thread| thread.join().is_err())
+            {
                 tracing::warn!("query history store worker panicked during shutdown");
             }
         } else if self.thread.take().is_some() {
@@ -85,8 +89,12 @@ impl StoreWorker {
 
     fn spawn_reaper(&mut self) {
         let shutdown = self.shutdown.take();
-        let Some(thread) = self.thread.take() else { return };
-        let Some(stopped) = self.stopped.take() else { return };
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let Some(stopped) = self.stopped.take() else {
+            return;
+        };
         match std::thread::Builder::new()
             .name("dnsbuffer-store-reaper".into())
             .spawn(move || reap_store_worker(shutdown, stopped, thread))
@@ -175,7 +183,9 @@ fn run_store_worker_with_interval(
             Some(events)
         });
         let Some(events) = events else { break };
-        if !events.is_empty() && let Err(error) = store.insert_events(&events) {
+        if !events.is_empty()
+            && let Err(error) = store.insert_events(&events)
+        {
             tracing::warn!(
                 count = events.len(),
                 "writing query history failed: {error:#}"
@@ -238,7 +248,7 @@ pub struct Ranking {
     pub cache_hits: i64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
 }
@@ -597,9 +607,7 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use super::{
-        QueryEvent, STORE_OPEN_LOCK, Store, StoreWorker, run_store_worker_with_interval,
-    };
+    use super::{QueryEvent, STORE_OPEN_LOCK, Store, StoreWorker, run_store_worker_with_interval};
 
     const HOUR_MS: i64 = 3_600_000;
     const DAY_MS: i64 = 86_400_000;
@@ -941,11 +949,7 @@ mod tests {
         let path = store.path.clone();
         let worker = StoreWorker::start(store, 7);
         let recorder = worker.recorder();
-        recorder.try_record(event(
-            1_753_488_000_000,
-            "shutdown.example",
-            &["192.0.2.2"],
-        ));
+        recorder.try_record(event(1_753_488_000_000, "shutdown.example", &["192.0.2.2"]));
 
         let started = Instant::now();
         worker.shutdown();
@@ -953,11 +957,7 @@ mod tests {
             started.elapsed() < Duration::from_millis(500),
             "explicit shutdown must not wait for recorder clones"
         );
-        recorder.try_record(event(
-            1_753_488_000_001,
-            "after-shutdown.example",
-            &[],
-        ));
+        recorder.try_record(event(1_753_488_000_001, "after-shutdown.example", &[]));
 
         let page = Store::open(&path).unwrap().queries(1, 10, None).unwrap();
         assert_eq!(page.total, 1);
@@ -970,11 +970,7 @@ mod tests {
         let path = store.path.clone();
         let recorder = StoreWorker::start(store, 7).detach();
         std::thread::sleep(Duration::from_millis(50));
-        recorder.try_record(event(
-            1_753_488_000_000,
-            "detached.example",
-            &["192.0.2.3"],
-        ));
+        recorder.try_record(event(1_753_488_000_000, "detached.example", &["192.0.2.3"]));
 
         let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -987,11 +983,18 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            let total = Store::open(&path).unwrap().queries(1, 10, None).unwrap().total;
+            let total = Store::open(&path)
+                .unwrap()
+                .queries(1, 10, None)
+                .unwrap()
+                .total;
             if total == 1 {
                 break;
             }
-            assert!(Instant::now() < deadline, "detached recorder event must be flushed");
+            assert!(
+                Instant::now() < deadline,
+                "detached recorder event must be flushed"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }

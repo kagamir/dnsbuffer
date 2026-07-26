@@ -20,20 +20,18 @@ use anyhow::Result;
 use crate::bootstrap::Bootstrap;
 use crate::config::{Config, UpstreamConfig};
 use crate::dashboard::upstreams::UpstreamMetricsBuilder;
+use crate::dashboard::{Recorder, upstreams::UpstreamMetrics};
 use crate::pipeline::Pipeline;
 use crate::resolver::Resolver;
 use crate::upstream::group::{FallbackResolver, UpstreamGroup};
 
-/// 依据配置构建完整解析链：bootstrap → filter → hosts → cache → ECS → 上游组
-/// →（可选）后备组 → Pipeline 装配。
-pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
-    Ok(build_pipeline_with_metrics(config).await?.0)
+pub struct BuiltPipeline {
+    pub pipeline: Arc<Pipeline>,
+    pub upstream_metrics: UpstreamMetrics,
 }
 
-/// 构建解析管线，并保留与调度共享的上游统计供 dashboard HTTP 层使用。
-pub async fn build_pipeline_with_metrics(
-    config: &Config,
-) -> Result<(Arc<Pipeline>, crate::dashboard::upstreams::UpstreamMetrics)> {
+/// 依据配置构建解析链，并使用调用方拥有的 recorder 记录查询。
+pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<BuiltPipeline> {
     let bootstrap = Arc::new(Bootstrap::from_config(
         &config.bootstrap.servers,
         config.server.prefer_ipv6,
@@ -54,16 +52,6 @@ pub async fn build_pipeline_with_metrics(
     let hosts = crate::hosts::HostsMap::from_entries(&config.hosts);
     let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
     let ecs = crate::ecs::subnet_from_config(&config.ecs);
-    #[cfg(not(test))]
-    let recorder = {
-        let store = crate::dashboard::store::Store::open(&config.dashboard.database_path)?;
-        crate::dashboard::store::StoreWorker::start(
-            store,
-            u64::from(config.dashboard.retention_days),
-        )
-        .detach()
-    };
-
     let mut metrics = UpstreamMetricsBuilder::default();
     let mut primary = build_group(
         &config.upstream,
@@ -107,10 +95,12 @@ pub async fn build_pipeline_with_metrics(
         upstream: resolver,
         ecs,
         query_timeout: std::time::Duration::from_millis(config.server.query_timeout_ms),
-        #[cfg(not(test))]
         recorder,
     }));
-    Ok((pipeline, metrics))
+    Ok(BuiltPipeline {
+        pipeline,
+        upstream_metrics: metrics,
+    })
 }
 
 async fn build_group(
@@ -259,8 +249,10 @@ mod tests {
         )
         .expect("config parses");
 
-        let (_pipeline, metrics) = build_pipeline_with_metrics(&config).await.expect("builds");
-        let snapshots = metrics.snapshot();
+        let built = build_pipeline(&config, Recorder::disabled())
+            .await
+            .expect("builds");
+        let snapshots = built.upstream_metrics.snapshot();
 
         assert_eq!(snapshots.len(), 6);
         assert_eq!(
@@ -282,7 +274,9 @@ mod tests {
                 .iter()
                 .map(|snapshot| snapshot.group)
                 .collect::<Vec<_>>(),
-            ["primary", "primary", "primary", "primary", "primary", "fallback"]
+            [
+                "primary", "primary", "primary", "primary", "primary", "fallback"
+            ]
         );
         assert_eq!(snapshots[0].name, "plain:1.1.1.1:53");
         assert_eq!(snapshots[1].name, "dot:dns.example:8853@[2001:db8::1]");

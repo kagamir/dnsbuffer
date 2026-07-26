@@ -93,6 +93,7 @@ mod tests {
             upstream: std::sync::Arc::new(EchoOk),
             ecs: None,
             query_timeout: Duration::from_secs(5),
+            recorder: crate::dashboard::Recorder::disabled(),
         });
         // 绑定随机端口获取地址，再交给 run_udp。
         let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -107,7 +108,10 @@ mod tests {
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.connect(addr).await.unwrap();
-        client.send(&sample_query(0xABCD).to_vec().unwrap()).await.unwrap();
+        client
+            .send(&sample_query(0xABCD).to_vec().unwrap())
+            .await
+            .unwrap();
         let mut buf = vec![0u8; 4096];
         let n = tokio::time::timeout(Duration::from_secs(2), client.recv(&mut buf))
             .await

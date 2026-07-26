@@ -19,7 +19,6 @@ pub struct PipelineParts {
     pub upstream: Arc<dyn Resolver>,
     pub ecs: Option<EcsSubnet>,
     pub query_timeout: Duration,
-    #[cfg(not(test))]
     pub recorder: Recorder,
 }
 
@@ -43,10 +42,7 @@ impl Pipeline {
             upstream: parts.upstream,
             ecs: parts.ecs,
             query_timeout: parts.query_timeout,
-            #[cfg(not(test))]
             recorder: parts.recorder,
-            #[cfg(test)]
-            recorder: Recorder::disabled(),
         }
     }
 
@@ -285,6 +281,7 @@ mod tests {
             upstream,
             ecs: None,
             query_timeout: Duration::from_secs(5),
+            recorder: Recorder::disabled(),
         }
     }
 
@@ -390,11 +387,7 @@ mod tests {
                 60,
                 RData::A(A::new(1, 1, 1, 1)),
             ));
-            response.add_authority(Record::from_rdata(
-                name,
-                60,
-                RData::A(A::new(9, 9, 9, 9)),
-            ));
+            response.add_authority(Record::from_rdata(name, 60, RData::A(A::new(9, 9, 9, 9))));
             Ok(response)
         }
     }
@@ -406,17 +399,13 @@ mod tests {
         pipeline.handle(&sample_query()).await;
 
         let event = events.recv().await.unwrap();
-        assert_eq!(
-            event.response_ips,
-            ["1.1.1.1", "2.2.2.2", "2001:db8::1"]
-        );
+        assert_eq!(event.response_ips, ["1.1.1.1", "2.2.2.2", "2001:db8::1"]);
     }
 
     #[tokio::test]
     async fn background_refresh_records_no_extra_client_event() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let (pipeline, mut events) =
-            recording_parts(Arc::new(CountingTtlZero(counter.clone())));
+        let (pipeline, mut events) = recording_parts(Arc::new(CountingTtlZero(counter.clone())));
         let query = sample_query();
         pipeline.handle(&query).await;
         pipeline.handle(&query).await;
@@ -474,6 +463,7 @@ mod tests {
             upstream: resolver,
             ecs: None,
             query_timeout: Duration::from_secs(5),
+            recorder: Recorder::disabled(),
         });
         let q = sample_query();
         let _ = pipeline.handle(&q).await; // 首查 → 上游 1 次 + 入缓存(TTL0)

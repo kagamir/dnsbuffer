@@ -1,10 +1,11 @@
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dnsbuffer::config::Config;
+use dnsbuffer::dashboard::Recorder;
 use dnsbuffer::{build_pipeline, server};
 use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
 use hickory_proto::rr::rdata::A;
@@ -56,7 +57,11 @@ async fn spawn_counting_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
             for q in &query.queries {
                 let name = q.name().clone();
                 resp.add_query(q.clone());
-                resp.add_answer(Record::from_rdata(name, 300, RData::A(A::new(93, 184, 216, 34))));
+                resp.add_answer(Record::from_rdata(
+                    name,
+                    300,
+                    RData::A(A::new(93, 184, 216, 34)),
+                ));
             }
             sock.send_to(&resp.to_vec().unwrap(), peer).await.unwrap();
         }
@@ -122,7 +127,10 @@ async fn proxy_forwards_to_upstream_and_replies() {
         "#
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let pipeline = build_pipeline(&cfg).await.unwrap();
+    let pipeline = build_pipeline(&cfg, Recorder::disabled())
+        .await
+        .unwrap()
+        .pipeline;
 
     tokio::spawn(async move {
         server::run_udp(listen, pipeline).await.unwrap();
@@ -170,7 +178,10 @@ async fn group_failover_and_fallback_serve() {
         "#
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let pipeline = build_pipeline(&cfg).await.unwrap();
+    let pipeline = build_pipeline(&cfg, Recorder::disabled())
+        .await
+        .unwrap()
+        .pipeline;
     tokio::spawn(async move {
         server::run_udp(listen, pipeline).await.unwrap();
     });
@@ -209,17 +220,16 @@ async fn hosts_entry_served_locally() {
         upstream.0
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let pipeline = build_pipeline(&cfg).await.unwrap();
+    let pipeline = build_pipeline(&cfg, Recorder::disabled())
+        .await
+        .unwrap()
+        .pipeline;
     tokio::spawn(async move { server::run_udp(listen, pipeline).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let resp = udp_query(listen, "printer.home.", RecordType::A).await;
     assert_eq!(resp.answers.len(), 1);
-    assert_eq!(
-        upstream.1.load(Ordering::SeqCst),
-        0,
-        "hosts 命中不得走上游"
-    );
+    assert_eq!(upstream.1.load(Ordering::SeqCst), 0, "hosts 命中不得走上游");
 }
 
 #[tokio::test]
@@ -243,11 +253,13 @@ async fn blocked_domain_returns_zero_address() {
         type = "plain"
         addr = "{}"
         "#,
-        rules_path,
-        upstream.0
+        rules_path, upstream.0
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let pipeline = build_pipeline(&cfg).await.unwrap();
+    let pipeline = build_pipeline(&cfg, Recorder::disabled())
+        .await
+        .unwrap()
+        .pipeline;
     tokio::spawn(async move { server::run_udp(listen, pipeline).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -272,16 +284,15 @@ async fn cache_serves_second_query() {
         upstream.0
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
-    let pipeline = build_pipeline(&cfg).await.unwrap();
+    let pipeline = build_pipeline(&cfg, Recorder::disabled())
+        .await
+        .unwrap()
+        .pipeline;
     tokio::spawn(async move { server::run_udp(listen, pipeline).await.unwrap() });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let _ = udp_query(listen, "cached.example.", RecordType::A).await;
     let resp2 = udp_query(listen, "cached.example.", RecordType::A).await;
     assert_eq!(resp2.metadata.response_code, ResponseCode::NoError);
-    assert_eq!(
-        upstream.1.load(Ordering::SeqCst),
-        1,
-        "第二次必须走缓存"
-    );
+    assert_eq!(upstream.1.load(Ordering::SeqCst), 1, "第二次必须走缓存");
 }

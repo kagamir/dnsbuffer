@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
-use dnsbuffer::build_pipeline_with_metrics;
+use dnsbuffer::build_pipeline;
 use dnsbuffer::config::Config;
-use dnsbuffer::dashboard::QueryEvent;
+use dnsbuffer::dashboard::build_runtime;
 use dnsbuffer::dashboard::http::{HttpState, router};
-use dnsbuffer::dashboard::store::Store;
+use dnsbuffer::dashboard::store::{Store, StoreWorker};
 use dnsbuffer::dashboard::upstreams::UpstreamMetrics;
+use dnsbuffer::dashboard::{QueryEvent, Recorder};
 use http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -69,7 +70,157 @@ async fn configured_metrics(
     .unwrap();
     config.dashboard.database_path = database_path.to_owned();
     config.dashboard.retention_days = 0;
-    build_pipeline_with_metrics(&config).await.unwrap()
+    let built = build_pipeline(&config, Recorder::disabled()).await.unwrap();
+    (built.pipeline, built.upstream_metrics)
+}
+
+fn runtime_config(database_path: &Path) -> Config {
+    let mut config: Config = toml::from_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:0"
+        hedged_retry_ms = 0
+
+        [dashboard]
+        listen = "127.0.0.1:0"
+
+        [[upstream]]
+        type = "plain"
+        addr = "1.1.1.1:53"
+        "#,
+    )
+    .unwrap();
+    config.dashboard.database_path = database_path.to_owned();
+    config
+}
+
+#[tokio::test]
+async fn runtime_build_fails_when_sqlite_cannot_be_initialized() {
+    let directory = std::env::temp_dir().join(format!(
+        "dnsbuffer-invalid-runtime-db-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let config = runtime_config(&directory);
+
+    let error = build_runtime(&config).await.unwrap_err();
+
+    assert!(error.to_string().contains("dashboard database"));
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[tokio::test]
+async fn runtime_build_fails_before_dns_when_http_address_is_occupied() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (guard, _store) = test_store("runtime-http-bind").await;
+    let mut config = runtime_config(guard.path());
+    config.dashboard.listen = listener.local_addr().unwrap();
+
+    let error = build_runtime(&config).await.unwrap_err();
+
+    assert!(error.to_string().contains("dashboard HTTP server"));
+}
+
+#[tokio::test]
+async fn runtime_returns_error_when_dns_service_stops() {
+    let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (guard, _store) = test_store("runtime-dns-exit").await;
+    let mut config = runtime_config(guard.path());
+    config.server.listen = occupied.local_addr().unwrap();
+    let runtime = build_runtime(&config).await.unwrap();
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), runtime.run())
+        .await
+        .expect("runtime must stop when DNS fails")
+        .unwrap_err();
+
+    assert!(error.to_string().contains("DNS UDP server stopped"));
+}
+
+#[tokio::test]
+async fn complete_pipeline_persists_query_details_aggregates_and_exposes_metrics() {
+    let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        let query = hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap();
+        let mut response = hickory_proto::op::Message::new(
+            query.metadata.id,
+            hickory_proto::op::MessageType::Response,
+            query.metadata.op_code,
+        );
+        response.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+        response.queries = query.queries;
+        upstream
+            .send_to(&response.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    let (guard, store) = test_store("complete-pipeline").await;
+    let worker = StoreWorker::start(store, 7);
+    let config: Config = toml::from_str(&format!(
+        r#"
+        [server]
+        listen = "127.0.0.1:0"
+        hedged_retry_ms = 0
+
+        [[upstream]]
+        type = "plain"
+        addr = "{upstream_addr}"
+        "#
+    ))
+    .unwrap();
+    let built = build_pipeline(&config, worker.recorder()).await.unwrap();
+    assert_eq!(
+        built.upstream_metrics.snapshot()[0].name,
+        format!("plain:{upstream_addr}")
+    );
+
+    let mut query = hickory_proto::op::Message::query();
+    let mut question = hickory_proto::op::Query::new();
+    question.set_name("persisted.example.".parse().unwrap());
+    question.set_query_type(hickory_proto::rr::RecordType::A);
+    query.add_query(question);
+    built.pipeline.handle(&query).await;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let path = guard.path().to_owned();
+        let persisted = tokio::task::spawn_blocking(move || {
+            let store = Store::open(&path).unwrap();
+            (
+                store.queries(1, 10, None).unwrap(),
+                store
+                    .trend(7, chrono::Utc::now().timestamp_millis())
+                    .unwrap(),
+            )
+        })
+        .await
+        .unwrap();
+        if persisted.0.total == 1 {
+            assert_eq!(persisted.0.records[0].domain, "persisted.example");
+            assert_eq!(
+                persisted
+                    .1
+                    .buckets
+                    .iter()
+                    .map(|bucket| bucket.total_queries)
+                    .sum::<i64>(),
+                1
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "query was not persisted"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::task::spawn_blocking(move || worker.shutdown())
+        .await
+        .unwrap();
 }
 
 fn event(domain: &str, ips: &[&str]) -> QueryEvent {
