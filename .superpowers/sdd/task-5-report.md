@@ -33,3 +33,11 @@
 - `std::sync::Mutex` remains the existing synchronization primitive. Locks cover only in-memory calculations/copies and no DNS or API I/O.
 - Timed-out primary group futures can be cancelled before an underlying member attempt completes, so no final outcome exists to record for that cancelled attempt. Hedged attempts are spawned and naturally finish, and therefore do update group stats.
 - Existing unrelated worktree changes in `src/config.rs`, `src/server.rs`, and `tests/forwarding.rs` were not staged or modified for this task.
+
+## Review Fix
+
+- RED: added a `build_pipeline_with_metrics` composition test that failed because snapshots had no stable member `id`; after adding `id`, it still failed because DoT IPv6 names were ambiguous and unbracketed.
+- GREEN: snapshots now expose stable per-group IDs (`primary-0`, `fallback-0`); Plain names retain the full socket address, DoT names include host, actual port, and bracketed IPv6 where applicable, and DoH names retain the full configured URL plus an explicit configured IP when present.
+- The composition test verifies primary/fallback registration count, group, order, IDs, and readable names for different DoH paths and ports.
+- The failed-attempt metrics test now uses a single-member failing group, so the attempted member and resulting failure sample are deterministic rather than random.
+- Hedged attempts still traverse `UpstreamGroup::resolve` and `try_member`, so each completed attempt reaches the shared stats path. No dedicated timing-sensitive hedged metrics assertion was added; cancellation at the outer fallback timeout remains the boundary described above.

@@ -150,7 +150,13 @@ async fn build_member(
             let (host, port) = crate::config::split_domain_port(domain)?;
             let tls = Arc::new(crate::tls::client_config(&[], &[], None)?);
             Ok((
-                format!("dot:{host}"),
+                format!(
+                    "dot:{host}:{port}@{}",
+                    match ip {
+                        std::net::IpAddr::V4(ip) => ip.to_string(),
+                        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+                    }
+                ),
                 Arc::new(DotResolver::new(
                     std::net::SocketAddr::new(*ip, port),
                     &host,
@@ -199,9 +205,96 @@ async fn build_member(
                 tracing::warn!("DoH upstream {host}: no ECH config available, SNI is visible");
             }
             Ok((
-                format!("doh:{host}"),
+                match ip {
+                    Some(std::net::IpAddr::V4(ip)) => format!("doh:{url}@{ip}"),
+                    Some(std::net::IpAddr::V6(ip)) => format!("doh:{url}@[{ip}]"),
+                    None => format!("doh:{url}"),
+                },
                 Arc::new(DohResolver::new(url, ips, ech_bytes, *http3, prefer_ipv6)?),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pipeline_metrics_preserve_configured_groups_order_and_unique_identity() {
+        let config: Config = toml::from_str(
+            r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            hedged_retry_ms = 0
+
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+
+            [[upstream]]
+            type = "dot"
+            ip = "2001:db8::1"
+            domain = "dns.example:8853"
+
+            [[upstream]]
+            type = "doh"
+            url = "https://dns.example:8443/first?profile=a"
+            ip = "192.0.2.1"
+
+            [[upstream]]
+            type = "doh"
+            url = "https://dns.example:8443/second"
+            ip = "2001:db8::2"
+
+            [[upstream]]
+            type = "doh"
+            url = "https://dns.example:8443/second"
+            ip = "2001:db8::2"
+
+            [[fallback]]
+            type = "plain"
+            addr = "8.8.8.8:53"
+            "#,
+        )
+        .expect("config parses");
+
+        let (_pipeline, metrics) = build_pipeline_with_metrics(&config).await.expect("builds");
+        let snapshots = metrics.snapshot();
+
+        assert_eq!(snapshots.len(), 6);
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "primary-0",
+                "primary-1",
+                "primary-2",
+                "primary-3",
+                "primary-4",
+                "fallback-0"
+            ]
+        );
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.group)
+                .collect::<Vec<_>>(),
+            ["primary", "primary", "primary", "primary", "primary", "fallback"]
+        );
+        assert_eq!(snapshots[0].name, "plain:1.1.1.1:53");
+        assert_eq!(snapshots[1].name, "dot:dns.example:8853@[2001:db8::1]");
+        assert_eq!(
+            snapshots[2].name,
+            "doh:https://dns.example:8443/first?profile=a@192.0.2.1"
+        );
+        assert_eq!(
+            snapshots[3].name,
+            "doh:https://dns.example:8443/second@[2001:db8::2]"
+        );
+        assert_eq!(snapshots[4].name, snapshots[3].name);
+        assert_ne!(snapshots[4].id, snapshots[3].id);
     }
 }

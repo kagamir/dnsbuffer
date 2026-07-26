@@ -237,11 +237,13 @@ mod tests {
 
         let snapshots = metrics.snapshot();
         assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].id, "primary-0");
         assert_eq!(snapshots[0].name, "primary-ok");
         assert_eq!(snapshots[0].group, "primary");
         assert_eq!(snapshots[0].samples, 1);
         assert_eq!(snapshots[0].successes, 1);
         assert_eq!(snapshots[0].failure_rate, 0.0);
+        assert_eq!(snapshots[1].id, "fallback-0");
         assert_eq!(snapshots[1].name, "fallback-dead");
         assert_eq!(snapshots[1].group, "fallback");
         assert_eq!(snapshots[1].samples, 1);
@@ -251,19 +253,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_record_every_retry_attempt() {
+    async fn metrics_record_failed_attempt_deterministically() {
         let mut metrics = UpstreamMetricsBuilder::default();
         let group = UpstreamGroup::new(
-            vec![
-                (
-                    "dead".into(),
-                    Arc::new(AlwaysErr(AtomicUsize::new(0))) as Arc<dyn Resolver>,
-                ),
-                (
-                    "ok".into(),
-                    Arc::new(CountingOk(AtomicUsize::new(0))) as Arc<dyn Resolver>,
-                ),
-            ],
+            vec![(
+                "dead".into(),
+                Arc::new(AlwaysErr(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+            )],
             64,
             5.0,
             &mut metrics,
@@ -271,20 +267,13 @@ mod tests {
         );
         let metrics = metrics.build();
 
-        for _ in 0..20 {
-            group
-                .resolve(&sample_query())
-                .await
-                .expect("retry eventually succeeds");
-        }
+        assert!(group.resolve(&sample_query()).await.is_err());
 
         let snapshots = metrics.snapshot();
-        let actual_samples: usize = snapshots.iter().map(|snapshot| snapshot.samples).sum();
-        let actual_failures: usize = snapshots
-            .iter()
-            .map(|snapshot| snapshot.samples - snapshot.successes)
-            .sum();
-        assert_eq!(actual_samples, 20 + actual_failures);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].name, "dead");
+        assert_eq!(snapshots[0].samples, 1);
+        assert_eq!(snapshots[0].successes, 0);
     }
 
     #[tokio::test]

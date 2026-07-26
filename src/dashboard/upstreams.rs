@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::stats::UpstreamStats;
 
 struct MetricMember {
+    id: String,
     name: String,
     group: &'static str,
     stats: Arc<Mutex<UpstreamStats>>,
@@ -13,6 +14,7 @@ pub struct UpstreamMetrics(Arc<Vec<MetricMember>>);
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct UpstreamSnapshot {
+    pub id: String,
     pub name: String,
     pub group: &'static str,
     pub samples: usize,
@@ -28,6 +30,7 @@ impl UpstreamMetrics {
             .filter_map(|member| {
                 let snapshot = member.stats.lock().ok()?.snapshot();
                 Some(UpstreamSnapshot {
+                    id: member.id.clone(),
                     name: member.name.clone(),
                     group: member.group,
                     samples: snapshot.samples,
@@ -50,7 +53,13 @@ impl UpstreamMetricsBuilder {
         group: &'static str,
         stats: Arc<Mutex<UpstreamStats>>,
     ) {
-        self.0.push(MetricMember { name, group, stats });
+        let group_index = self.0.iter().filter(|member| member.group == group).count();
+        self.0.push(MetricMember {
+            id: format!("{group}-{group_index}"),
+            name,
+            group,
+            stats,
+        });
     }
 
     pub fn build(self) -> UpstreamMetrics {
