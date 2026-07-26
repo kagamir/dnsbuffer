@@ -68,4 +68,4 @@ Implemented non-blocking DNS query history recording and the SQLite store worker
 
 ### Follow-up Commit
 
-- Pending at report update time; the resulting commit is reported in the final response.
+- `09456d3 fix: decouple query recorder shutdown`
