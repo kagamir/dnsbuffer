@@ -12,13 +12,16 @@
       <p class="eyebrow">DNS OPERATIONS</p>
       <h1>dnsbuffer</h1>
     </div>
-    <div class="live-status"><span class="status-dot" aria-hidden="true"></span><span>每 5 秒自动更新</span></div>
+    <div class="refresh-meta">
+      <div class="live-status"><span class="status-dot" aria-hidden="true"></span><span id="refresh-status" role="status" aria-live="polite">正在载入</span></div>
+      <span id="last-updated">尚未完成更新</span>
+    </div>
   </header>
 
   <main>
     <section id="trend" class="panel trend-panel" aria-labelledby="trend-title">
       <div class="panel-heading">
-        <div><p class="section-index">01 / TRAFFIC</p><h2 id="trend-title">查询趋势</h2></div>
+        <div><p class="section-index">01 / TRAFFIC</p><h2 id="trend-title">查询趋势</h2><p id="trend-range" class="trend-range">正在载入数据范围...</p></div>
         <div class="legend" aria-label="图表图例">
           <span><i class="legend-total" aria-hidden="true"></i>全部查询</span>
           <span><i class="legend-blocked" aria-hidden="true"></i>已屏蔽</span>
@@ -27,6 +30,7 @@
       </div>
       <p class="panel-error" role="status" aria-live="polite"></p>
       <canvas id="trend-chart" aria-label="全部查询、已屏蔽和缓存命中的时间趋势图" role="img"></canvas>
+      <p id="trend-summary" class="sr-only" aria-live="polite">查询趋势正在载入</p>
     </section>
 
     <div class="split-grid">

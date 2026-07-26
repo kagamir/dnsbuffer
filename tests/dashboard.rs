@@ -374,18 +374,27 @@ async fn embedded_frontend_contract() {
         "id=\"query-body\"",
         "id=\"previous-page\"",
         "id=\"next-page\"",
+        "id=\"refresh-status\"",
+        "id=\"trend-range\"",
+        "id=\"trend-summary\"",
         "aria-label=",
     ] {
         assert!(index.contains(marker), "index missing {marker}");
     }
 
-    let app_js = text(request(app, "/app.js").await).await;
+    let app_js = text(request(app.clone(), "/app.js").await).await;
     for marker in [
         "5000",
         "AbortController",
         "encodeURIComponent(state.search)",
-        "state.page = 1",
+        "page: 1",
+        "root.DnsDashboard",
     ] {
         assert!(app_js.contains(marker), "app.js missing {marker}");
+    }
+
+    let chart_js = text(request(app, "/chart.js").await).await;
+    for marker in ["granularity", "setLineDash", "normalizeValue"] {
+        assert!(chart_js.contains(marker), "chart.js missing {marker}");
     }
 }
