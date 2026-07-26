@@ -33,7 +33,8 @@ Implemented non-blocking DNS query history recording and the SQLite store worker
 
 ## Commit
 
-Pending at report creation; populated by the task commit containing this report.
+- `121ec67 feat: record DNS query history`
+- The report was created in that commit and updated immediately afterward with the resulting commit ID.
 
 ## Concerns
 
