@@ -41,3 +41,10 @@
 
 - `cargo test --test dashboard -- --nocapture`: 6 passed, 0 failed.
 - `cargo test`: 117 unit tests, 11 integration tests, and doc tests passed; 0 failed.
+
+## Re-review Follow-up
+
+- Restored `UpstreamMetricsBuilder::register` to `pub(crate)`; no low-level metrics registration or test-only construction API is publicly exposed.
+- Refactored the external route test to obtain a non-empty cold-start snapshot through the public `build_pipeline_with_metrics` composition API and a minimal plain-upstream configuration.
+- The test continues to assert `id`, `name`, `group`, zero samples/successes, zero failure rate, and `avg_latency_ms: null` from the real routed API response.
+- The visibility regression was verified first: after restoring `pub(crate)`, the old integration test failed to compile at its direct `register` call. Replacing that call with the public composition path restored the test without changing production behavior.

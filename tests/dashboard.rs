@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
+use dnsbuffer::build_pipeline_with_metrics;
+use dnsbuffer::config::Config;
 use dnsbuffer::dashboard::QueryEvent;
 use dnsbuffer::dashboard::http::{HttpState, router};
 use dnsbuffer::dashboard::store::Store;
-use dnsbuffer::dashboard::upstreams::{UpstreamMetrics, UpstreamMetricsBuilder};
-use dnsbuffer::stats::UpstreamStats;
+use dnsbuffer::dashboard::upstreams::UpstreamMetrics;
 use http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -49,6 +50,26 @@ async fn insert_events(store: Store, events: Vec<QueryEvent>) -> Store {
     })
     .await
     .unwrap()
+}
+
+async fn configured_metrics(
+    database_path: &Path,
+) -> (Arc<dnsbuffer::pipeline::Pipeline>, UpstreamMetrics) {
+    let mut config: Config = toml::from_str(
+        r#"
+        [server]
+        listen = "127.0.0.1:5300"
+        hedged_retry_ms = 0
+
+        [[upstream]]
+        type = "plain"
+        addr = "1.1.1.1:53"
+        "#,
+    )
+    .unwrap();
+    config.dashboard.database_path = database_path.to_owned();
+    config.dashboard.retention_days = 0;
+    build_pipeline_with_metrics(&config).await.unwrap()
 }
 
 fn event(domain: &str, ips: &[&str]) -> QueryEvent {
@@ -152,18 +173,15 @@ async fn queries_validate_pagination_search_and_return_utc_timestamps() {
 
 #[tokio::test]
 async fn all_api_routes_are_json_read_only_and_use_utc_times() {
-    let (_guard, store) = test_store("api-routes").await;
+    let (guard, store) = test_store("api-routes").await;
     let mut first = event("popular.example", &["1.1.1.1", "2606:4700::1111"]);
     first.blocked = true;
     first.cache_hit = false;
     let mut second = event("popular.example", &[]);
     second.duration_ms = 25;
     let store = insert_events(store, vec![first, second, event("other.example", &[])]).await;
-    let stats = Arc::new(Mutex::new(UpstreamStats::new(4)));
-    stats.lock().unwrap().record_failure();
-    let mut metrics = UpstreamMetricsBuilder::default();
-    metrics.register("plain:1.1.1.1:53".into(), "primary", stats);
-    let app = test_router_with_metrics(store, metrics.build());
+    let (_pipeline, metrics) = configured_metrics(guard.path()).await;
+    let app = test_router_with_metrics(store, metrics);
 
     let trend = request(app.clone(), "/api/dashboard/trend").await;
     assert_eq!(trend.status(), StatusCode::OK);
@@ -188,9 +206,9 @@ async fn all_api_routes_are_json_read_only_and_use_utc_times() {
     assert_eq!(upstreams[0]["id"], "primary-0");
     assert_eq!(upstreams[0]["name"], "plain:1.1.1.1:53");
     assert_eq!(upstreams[0]["group"], "primary");
-    assert_eq!(upstreams[0]["samples"], 1);
+    assert_eq!(upstreams[0]["samples"], 0);
     assert_eq!(upstreams[0]["successes"], 0);
-    assert_eq!(upstreams[0]["failure_rate"], 1.0);
+    assert_eq!(upstreams[0]["failure_rate"], 0.0);
     assert!(upstreams[0]["avg_latency_ms"].is_null());
 
     let rankings = json(request(app.clone(), "/api/dashboard/rankings").await).await;
