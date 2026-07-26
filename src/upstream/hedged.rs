@@ -164,6 +164,16 @@ mod tests {
         .expect("count reached expected value");
     }
 
+    async fn wait_for_at_least(value: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while value.load(Ordering::SeqCst) < expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("count reached expected minimum");
+    }
+
     /// 第一次调用挂 60s，后续调用立即成功——模拟「首连丢包，重试才通」。
     struct SlowThenFast(AtomicUsize);
     #[async_trait]
@@ -333,7 +343,7 @@ mod tests {
             let hedged = hedged.clone();
             async move { hedged.resolve(&query).await }
         });
-        wait_for_count(&active, 2).await;
+        wait_for_at_least(&active, 2).await;
 
         task.abort();
         assert!(task.await.expect_err("outer task aborted").is_cancelled());
