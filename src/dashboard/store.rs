@@ -964,41 +964,47 @@ mod tests {
         assert_eq!(page.records[0].domain, "shutdown.example");
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn dropping_last_detached_recorder_never_blocks_tokio_worker() {
+    #[test]
+    fn dropping_last_detached_recorder_returns_within_deadline() {
         let (_guard, store) = test_store("worker-detached-drop");
         let path = store.path.clone();
         let recorder = StoreWorker::start(store, 7).detach();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        std::thread::sleep(Duration::from_millis(50));
         recorder.try_record(event(
             1_753_488_000_000,
             "detached.example",
             &["192.0.2.3"],
         ));
 
-        tokio::time::timeout(Duration::from_millis(50), async move {
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
             drop(recorder);
-        })
-        .await
-        .expect("recorder drop must only close its sender");
+            let _ = dropped_tx.send(());
+        });
+        dropped_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("recorder drop must only close its sender");
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let total = Store::open(&path).unwrap().queries(1, 10, None).unwrap().total;
-                if total == 1 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let total = Store::open(&path).unwrap().queries(1, 10, None).unwrap().total;
+            if total == 1 {
+                break;
             }
-        })
-        .await
-        .expect("detached recorder event must be flushed");
+            assert!(Instant::now() < deadline, "detached recorder event must be flushed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
     fn concurrent_open_of_same_database_succeeds() {
-        let (guard, store) = test_store("concurrent-open");
-        drop(store);
+        let path = std::env::temp_dir().join(format!(
+            "dnsbuffer-concurrent-first-open-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let guard = TestDatabase(path);
+        assert!(!guard.path().exists());
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
         let threads = (0..8)
             .map(|_| {
@@ -1014,20 +1020,22 @@ mod tests {
         for thread in threads {
             thread.join().unwrap().unwrap();
         }
+        let store = Store::open(guard.path()).unwrap();
+        store
+            .insert_events(&[event(1_753_488_000_000, "initialized.example", &[])])
+            .unwrap();
+        assert_eq!(store.queries(1, 10, None).unwrap().total, 1);
     }
 
     #[test]
     fn poisoned_open_lock_does_not_make_store_open_panic() {
         let lock = STORE_OPEN_LOCK.get_or_init(|| Mutex::new(()));
         if !lock.is_poisoned() {
-            let previous_hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {}));
             let _ = std::thread::spawn(move || {
                 let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 panic!("poison store open lock for regression test");
             })
             .join();
-            std::panic::set_hook(previous_hook);
         }
         let path = std::env::temp_dir().join(format!(
             "dnsbuffer-poisoned-open-{}-{}.db",

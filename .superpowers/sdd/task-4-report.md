@@ -69,3 +69,21 @@ Implemented non-blocking DNS query history recording and the SQLite store worker
 ### Follow-up Commit
 
 - `09456d3 fix: decouple query recorder shutdown`
+
+## Review Test Corrections
+
+The ownership description in the original Implementation Notes is superseded by Important Review Follow-up and commit `09456d3`. Recorder does not own a worker shutdown guard and never waits or joins during drop. StoreWorker exclusively owns explicit shutdown; detached workers are joined by a separate reaper thread.
+
+### Test Improvements
+
+- The same-database concurrency test now starts with a unique path that does not exist and synchronizes eight threads on their first `Store::open`. It then writes and queries an event to verify usable schema initialization. Its database, WAL, and SHM files remain covered by `TestDatabase` cleanup.
+- A real Hickory response now contains duplicate A answers, an AAAA answer requiring canonical formatting, and an authority A record. The event assertion proves only final answers are normalized, sorted, and deduplicated.
+- Recorder drop now occurs on an independent standard thread. A standard channel `recv_timeout(50ms)` fails on schedule if drop blocks, without risking a stuck Tokio runtime worker.
+- The poison robustness test no longer replaces the process-global panic hook, avoiding interference with parallel tests.
+
+### Verification
+
+- `cargo test dashboard::store::tests::concurrent_open_of_same_database_succeeds -- --nocapture`: 1 passed, 0 failed.
+- `cargo test pipeline::tests::records_only_normalized_unique_sorted_ips_from_final_answers -- --nocapture`: 1 passed, 0 failed.
+- `cargo test dashboard::store::tests::dropping_last_detached_recorder_returns_within_deadline -- --nocapture`: 1 passed, 0 failed.
+- The corrected tests passed against the existing production behavior; no production behavior change was needed in this review round.

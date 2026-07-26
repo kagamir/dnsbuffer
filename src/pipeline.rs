@@ -215,7 +215,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
-    use hickory_proto::rr::rdata::A;
+    use hickory_proto::rr::rdata::{A, AAAA};
     use hickory_proto::rr::{Name, RData, Record, RecordType};
     use std::str::FromStr;
     use std::sync::Arc;
@@ -356,6 +356,60 @@ mod tests {
         assert!(event.blocked);
         assert!(!event.cache_hit);
         assert!(events.try_recv().is_err());
+    }
+
+    struct MixedAnswerResolver;
+
+    #[async_trait]
+    impl Resolver for MixedAnswerResolver {
+        async fn resolve(&self, query: &Message) -> Result<Message> {
+            let mut response = Message::new(
+                query.metadata.id,
+                MessageType::Response,
+                query.metadata.op_code,
+            );
+            response.metadata.response_code = ResponseCode::NoError;
+            let name = query.queries[0].name().clone();
+            response.add_answer(Record::from_rdata(
+                name.clone(),
+                60,
+                RData::AAAA(AAAA("2001:0db8:0:0:0:0:0:1".parse().unwrap())),
+            ));
+            response.add_answer(Record::from_rdata(
+                name.clone(),
+                60,
+                RData::A(A::new(2, 2, 2, 2)),
+            ));
+            response.add_answer(Record::from_rdata(
+                name.clone(),
+                60,
+                RData::A(A::new(1, 1, 1, 1)),
+            ));
+            response.add_answer(Record::from_rdata(
+                name.clone(),
+                60,
+                RData::A(A::new(1, 1, 1, 1)),
+            ));
+            response.add_authority(Record::from_rdata(
+                name,
+                60,
+                RData::A(A::new(9, 9, 9, 9)),
+            ));
+            Ok(response)
+        }
+    }
+
+    #[tokio::test]
+    async fn records_only_normalized_unique_sorted_ips_from_final_answers() {
+        let (pipeline, mut events) = recording_parts(Arc::new(MixedAnswerResolver));
+
+        pipeline.handle(&sample_query()).await;
+
+        let event = events.recv().await.unwrap();
+        assert_eq!(
+            event.response_ips,
+            ["1.1.1.1", "2.2.2.2", "2001:db8::1"]
+        );
     }
 
     #[tokio::test]
