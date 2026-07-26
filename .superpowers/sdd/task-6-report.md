@@ -27,3 +27,17 @@
 
 - No pre-existing modifications in `src/config.rs`, `src/server.rs`, or `tests/forwarding.rs` were changed.
 - Existing untracked dashboard database files were left untouched.
+
+## Review Follow-up
+
+- Added HTTP-layer checked pagination offset validation before `spawn_blocking`; multiplication overflow and offsets beyond `i64` now return JSON 400 rather than database 500. The `u64::MAX` regression test first reproduced the incorrect 500 response.
+- Extended query integration coverage through Axum extraction and SQLite for a percent-encoded non-ASCII domain containing a literal `+`, plus IP search.
+- Asserted the complete trend, upstream, rankings, and query response contracts, including parseable RFC3339 UTC timestamps, ordering/counters, nullable latency, and response IPs.
+- Read embedded asset bodies and asserted the four regions, controls, script references, and chart module version declaration.
+- Moved test database setup and event insertion into `spawn_blocking`; made the existing upstream metrics builder registration API public as the minimal production construction boundary needed by external consumers and integration tests.
+- Deliberately did not add a production JoinError fault-injection interface. Panic-path injection would pollute the API solely for testing; the remaining risk is limited to static inspection of the shared `database_call` JoinError mapping.
+
+### Follow-up Verification
+
+- `cargo test --test dashboard -- --nocapture`: 6 passed, 0 failed.
+- `cargo test`: 117 unit tests, 11 integration tests, and doc tests passed; 0 failed.

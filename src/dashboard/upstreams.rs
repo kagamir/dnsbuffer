@@ -47,7 +47,7 @@ impl UpstreamMetrics {
 pub struct UpstreamMetricsBuilder(Vec<MetricMember>);
 
 impl UpstreamMetricsBuilder {
-    pub(crate) fn register(
+    pub fn register(
         &mut self,
         name: String,
         group: &'static str,

@@ -167,6 +167,10 @@ impl QueryParams {
         if !(1..=200).contains(&page_size) {
             return Err(ApiError::bad_request("page_size must be between 1 and 200"));
         }
+        page.checked_sub(1)
+            .and_then(|value| value.checked_mul(page_size))
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| ApiError::bad_request("page offset is out of range"))?;
         let search = self.search.map(|value| value.trim().to_owned());
         if search
             .as_ref()
