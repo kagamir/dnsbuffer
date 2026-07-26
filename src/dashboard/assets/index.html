@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dnsbuffer dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <h1>dnsbuffer</h1>
+    <section id="trend"><h2>Query trend</h2></section>
+    <section id="rankings"><h2>Domain rankings</h2></section>
+    <section id="upstreams"><h2>Upstreams</h2></section>
+    <section id="queries">
+      <h2>Queries</h2>
+      <label>Search <input id="search" type="search" maxlength="253"></label>
+      <button id="previous" type="button">Previous</button>
+      <span id="page">1</span>
+      <button id="next" type="button">Next</button>
+    </section>
+  </main>
+  <script src="/chart.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

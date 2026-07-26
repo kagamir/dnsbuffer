@@ -38,3 +38,4 @@ webpki-roots = "1.0.9"
 
 [dev-dependencies]
 rcgen = "0.14.8"
+tower = { version = "0.5", features = ["util"] }

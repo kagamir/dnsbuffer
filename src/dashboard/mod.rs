@@ -63,4 +63,5 @@ impl Recorder {
 }
 
 pub mod store;
+pub mod http;
 pub mod upstreams;
