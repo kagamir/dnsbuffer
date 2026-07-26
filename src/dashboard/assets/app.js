@@ -68,6 +68,11 @@
     return failed ? "failure" : "success";
   }
 
+  function mapQueryResult(regionResult, action) {
+    if (regionResult !== "success") return regionResult;
+    return action === "render" ? "success" : "superseded";
+  }
+
   function upstreamStatus(upstream) {
     const samples = normalizeCount(upstream.samples);
     const successes = normalizeCount(upstream.successes);
@@ -233,7 +238,7 @@
       if (success === "success" && action === "retry") return loadQueries(true, roundId);
       if (success === "success" && action === "reject") setError("queries", "数据总数连续变化，已保留上次查询结果");
       if (mayFinishQuery(requestId, state.queryRequestId)) setQueryLoading(false);
-      return success === "success" && action === "render" ? "success" : success;
+      return mapQueryResult(success, action);
     }
     function refreshAll() {
       const roundId = roundTracker.begin();
@@ -263,5 +268,5 @@
     updatePagination(); refreshAll(); window.setInterval(refreshAll, 5000);
   }
 
-  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, upstreamStatus };
+  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, upstreamStatus };
 }));

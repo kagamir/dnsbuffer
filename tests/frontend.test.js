@@ -95,6 +95,12 @@ test("only a real request error is classified as failure", () => {
   assert.equal(dashboard.classifyRegionResult({ aborted: false, current: true, failed: false }), "success");
 });
 
+test("query outcome maps reject to superseded, render to success, and preserves HTTP failure", () => {
+  assert.equal(dashboard.mapQueryResult("success", "reject"), "superseded");
+  assert.equal(dashboard.mapQueryResult("success", "render"), "success");
+  assert.equal(dashboard.mapQueryResult("failure", "render"), "failure");
+});
+
 test("upstream status distinguishes no samples, unavailable, degraded, and healthy", () => {
   assert.deepEqual(dashboard.upstreamStatus({ samples: 0, successes: 0, failure_rate: 0 }), { text: "暂无数据", kind: "neutral" });
   assert.deepEqual(dashboard.upstreamStatus({ samples: 3, successes: 0, failure_rate: 1 }), { text: "不可用", kind: "bad" });

@@ -18,6 +18,7 @@
 - Isolated five-second refresh rounds with generation IDs; interactive query loads and stale overlapping rounds cannot update global refresh status or last-success time.
 - Deferred browser startup until DOM readiness, restricted live announcements to refresh errors, and reject invalid trend ranges before replacing cached success data.
 - Classified region loads as `success`, `failure`, or `superseded`; an interactive query that replaces polling leaves that refresh round incomplete without reporting an API failure or updating the complete-success time.
+- Mapped a bounded pagination correction `reject` to `superseded`, so preserved query DOM cannot count as a successful refresh; renderable responses remain `success` and HTTP errors remain `failure`.
 - Made dashboard startup idempotent and removed routine polling announcements from trend summaries, upstream data, and pagination status; `.panel-error` nodes remain live error announcements.
 
 ## TDD Evidence
@@ -29,12 +30,13 @@
 5. Added `tests/frontend.test.js` using only Node's built-in test runner. The initial run failed because browser-only modules were not exportable; pagination concurrency/search tests subsequently failed until request-generation and search-state logic were implemented.
 6. Added failing executable tests for consecutive pagination reductions, state commit semantics, overlapping refresh rounds, and interactive-query exclusion before implementing the review fixes. These are production pure-logic/orchestration tests, not DOM integration tests.
 7. Added failing tests for `superseded` round handling and true HTTP-error classification, then wired the same classifiers into `loadRegion` and `refreshAll`.
+8. Added a failing production-mapping test for query `reject -> superseded`, `render -> success`, and HTTP `failure -> failure`, then reused that mapping in `loadQueries`.
 
 ## Verification
 
 - `cargo test --test dashboard -- --nocapture`: 7 passed, 0 failed.
 - `cargo test -- --nocapture`: 129 total Rust tests passed (117 unit, 7 dashboard integration, 5 forwarding integration), 0 failed.
-- `node --test tests/frontend.test.js`: 14 passed, 0 failed.
+- `node --test tests/frontend.test.js`: 15 passed, 0 failed.
 - `node --check src/dashboard/assets/app.js`: passed.
 - `node --check src/dashboard/assets/chart.js`: passed.
 - Static search for `innerHTML`, `outerHTML`, and `insertAdjacentHTML` in dashboard JavaScript: no matches.
