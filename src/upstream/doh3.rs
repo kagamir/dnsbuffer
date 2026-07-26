@@ -12,6 +12,7 @@ const KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 const MAX_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 struct H3State {
+    generation: u64,
     /// 保留 quinn 连接句柄，复用前用 close_reason() 检查死活。
     conn: quinn::Connection,
     sender: H3Sender,
@@ -25,6 +26,7 @@ pub struct H3Conn {
     ips: Vec<IpAddr>,
     endpoint: quinn::Endpoint,
     state: Mutex<Option<H3State>>,
+    next_generation: std::sync::atomic::AtomicU64,
 }
 
 impl H3Conn {
@@ -67,7 +69,23 @@ impl H3Conn {
             ips,
             endpoint,
             state: Mutex::new(None),
+            next_generation: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    fn allocate_generation(&self) -> u64 {
+        self.next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    async fn invalidate_generation(&self, generation: u64) {
+        let mut state = self.state.lock().await;
+        if state
+            .as_ref()
+            .is_some_and(|current| current.generation == generation)
+        {
+            *state = None;
+        }
     }
 
     async fn connect(&self) -> Result<(quinn::Connection, H3Sender)> {
@@ -103,7 +121,7 @@ impl H3Conn {
     pub async fn request(&self, uri: &str, body: Vec<u8>) -> Result<Vec<u8>> {
         for attempt in 0..2 {
             // 锁内只做检活/取用/建连并克隆 sender；请求发送在锁外，保住 H3 多路复用
-            let mut sender = {
+            let (mut sender, generation) = {
                 let mut guard = self.state.lock().await;
                 // 已死连接（idle 超时/对端关闭）直接丢弃，避免拿着它死等
                 if guard
@@ -114,9 +132,14 @@ impl H3Conn {
                 }
                 if guard.is_none() {
                     let (conn, sender) = self.connect().await?;
-                    *guard = Some(H3State { conn, sender });
+                    *guard = Some(H3State {
+                        generation: self.allocate_generation(),
+                        conn,
+                        sender,
+                    });
                 }
-                guard.as_ref().expect("just set").sender.clone()
+                let state = guard.as_ref().expect("just set");
+                (state.sender.clone(), state.generation)
             };
 
             let req = http::Request::builder()
@@ -153,7 +176,7 @@ impl H3Conn {
             match result {
                 Ok(data) => return Ok(data),
                 Err(e) => {
-                    *self.state.lock().await = None; // 连接可能已坏，重建
+                    self.invalidate_generation(generation).await;
                     if attempt == 1 {
                         return Err(e);
                     }
@@ -270,6 +293,48 @@ pub(crate) mod tests {
         q.set_query_type(RecordType::A);
         m.add_query(q);
         m
+    }
+
+    async fn connected_state(conn: &H3Conn, generation: u64) -> H3State {
+        let (quinn, sender) = conn.connect().await.expect("connect mock H3 server");
+        H3State {
+            generation,
+            conn: quinn,
+            sender,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_generation_does_not_clear_newer_connection() {
+        let (addr, root) = spawn_mock_h3_server().await;
+        let tls = crate::tls::client_config(&[b"h3"], &[root], None).unwrap();
+        let conn = H3Conn::new("localhost".into(), addr.port(), vec![addr.ip()], tls).unwrap();
+        let state = connected_state(&conn, 2).await;
+        *conn.state.lock().await = Some(state);
+
+        conn.invalidate_generation(1).await;
+
+        assert_eq!(
+            conn.state
+                .lock()
+                .await
+                .as_ref()
+                .map(|state| state.generation),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn current_generation_is_cleared_after_failure() {
+        let (addr, root) = spawn_mock_h3_server().await;
+        let tls = crate::tls::client_config(&[b"h3"], &[root], None).unwrap();
+        let conn = H3Conn::new("localhost".into(), addr.port(), vec![addr.ip()], tls).unwrap();
+        let state = connected_state(&conn, 7).await;
+        *conn.state.lock().await = Some(state);
+
+        conn.invalidate_generation(7).await;
+
+        assert!(conn.state.lock().await.is_none());
     }
 
     #[tokio::test]
