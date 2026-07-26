@@ -98,9 +98,9 @@ impl Store {
                 )?;
             }
 
-            let hourly_bucket = event.timestamp_ms.div_euclid(3_600_000) * 3_600_000;
             let timestamp = DateTime::<Utc>::from_timestamp_millis(event.timestamp_ms)
                 .context("query event timestamp is out of range")?;
+            let hourly_bucket = event.timestamp_ms.div_euclid(3_600_000) * 3_600_000;
             let daily_bucket = timestamp
                 .date_naive()
                 .and_hms_opt(0, 0, 0)
@@ -188,6 +188,64 @@ mod tests {
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM query_response_ips"), 2);
         assert_eq!(
             scalar(&conn, "SELECT total_queries FROM query_hourly_stats"),
+            1
+        );
+        assert_eq!(scalar(&conn, "SELECT cache_hits FROM query_daily_stats"), 1);
+    }
+
+    #[test]
+    fn rejects_out_of_range_timestamp_without_panicking() {
+        let (_guard, store) = test_store("timestamp-range");
+        let event = QueryEvent {
+            timestamp_ms: i64::MIN,
+            domain: "example.com".into(),
+            query_type: "A".into(),
+            response_code: "NOERROR".into(),
+            duration_ms: 12,
+            blocked: false,
+            cache_hit: false,
+            response_ips: Vec::new(),
+        };
+
+        assert!(store.insert_events(&[event]).is_err());
+    }
+
+    #[test]
+    fn persists_across_reopen_and_accumulates_shared_buckets() {
+        let (guard, store) = test_store("reopen-aggregate");
+        let first = QueryEvent {
+            timestamp_ms: 1_753_488_000_000,
+            domain: "first.example".into(),
+            query_type: "A".into(),
+            response_code: "NOERROR".into(),
+            duration_ms: 10,
+            blocked: true,
+            cache_hit: false,
+            response_ips: Vec::new(),
+        };
+        let second = QueryEvent {
+            timestamp_ms: first.timestamp_ms + 1_000,
+            domain: "second.example".into(),
+            query_type: "AAAA".into(),
+            response_code: "NOERROR".into(),
+            duration_ms: 20,
+            blocked: false,
+            cache_hit: true,
+            response_ips: Vec::new(),
+        };
+        store.insert_events(&[first]).unwrap();
+        drop(store);
+
+        let store = Store::open(guard.path()).unwrap();
+        store.insert_events(&[second]).unwrap();
+        let conn = store.connect().unwrap();
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM query_logs"), 2);
+        assert_eq!(
+            scalar(&conn, "SELECT total_queries FROM query_hourly_stats"),
+            2
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT blocked_queries FROM query_daily_stats"),
             1
         );
         assert_eq!(scalar(&conn, "SELECT cache_hits FROM query_daily_stats"), 1);
