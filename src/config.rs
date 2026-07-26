@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -24,6 +24,8 @@ pub struct Config {
     pub fallback: Vec<UpstreamConfig>,
     #[serde(default)]
     pub selector: SelectorConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
 }
 
 fn default_query_timeout_ms() -> u64 {
@@ -107,6 +109,38 @@ fn default_window() -> usize {
 
 fn default_k() -> f64 {
     5.0
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DashboardConfig {
+    #[serde(default = "default_dashboard_listen")]
+    pub listen: SocketAddr,
+    #[serde(default = "default_database_path")]
+    pub database_path: PathBuf,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_dashboard_listen(),
+            database_path: default_database_path(),
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+fn default_dashboard_listen() -> SocketAddr {
+    "0.0.0.0:8080".parse().unwrap()
+}
+
+fn default_database_path() -> PathBuf {
+    PathBuf::from("dnsbuffer.db")
+}
+
+fn default_retention_days() -> u32 {
+    7
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -196,6 +230,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         if self.upstream.is_empty() {
             bail!("config must define at least one [[upstream]]");
+        }
+        if self.dashboard.database_path.as_os_str().is_empty() {
+            bail!("dashboard database_path must not be empty");
         }
         for b in &self.bootstrap.servers {
             if let UpstreamConfig::Doh { ip: None, url, .. } = b {
@@ -415,6 +452,43 @@ mod tests {
     fn example_config_stays_valid() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         load(&path).expect("config.example.toml must parse and validate");
+    }
+
+    #[test]
+    fn dashboard_defaults_and_overrides() {
+        let base = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            {dashboard}
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(&base.replace("{dashboard}", "")).unwrap();
+        assert_eq!(cfg.dashboard.listen, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(cfg.dashboard.database_path, PathBuf::from("dnsbuffer.db"));
+        assert_eq!(cfg.dashboard.retention_days, 7);
+
+        let custom = "[dashboard]\nlisten = \"127.0.0.1:9090\"\ndatabase_path = \"data/stats.db\"\nretention_days = 0";
+        let cfg: Config = toml::from_str(&base.replace("{dashboard}", custom)).unwrap();
+        assert_eq!(cfg.dashboard.listen, "127.0.0.1:9090".parse().unwrap());
+        assert_eq!(cfg.dashboard.database_path, PathBuf::from("data/stats.db"));
+        assert_eq!(cfg.dashboard.retention_days, 0);
+    }
+
+    #[test]
+    fn dashboard_rejects_empty_database_path() {
+        let text = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            [dashboard]
+            database_path = ""
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

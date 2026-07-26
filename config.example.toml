@@ -9,6 +9,11 @@ hedged_retry_ms = 1000           # 对冲式重试间隔：超时未返回即并
 level = "info"           # error | warn | info | debug | trace；RUST_LOG 环境变量优先
                          # warn 只看启动信息与配置问题；info 额外显示请求失败/重试
 
+[dashboard]
+listen = "0.0.0.0:8080"
+database_path = "dnsbuffer.db"
+retention_days = 7
+
 [cache]
 max_entries = 10000
 
