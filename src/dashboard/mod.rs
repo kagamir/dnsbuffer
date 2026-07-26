@@ -10,7 +10,7 @@ use crate::config::Config;
 pub struct Runtime {
     http_listener: tokio::net::TcpListener,
     http_state: http::HttpState,
-    dns_listen: std::net::SocketAddr,
+    dns_socket: Arc<tokio::net::UdpSocket>,
     pipeline: Arc<crate::pipeline::Pipeline>,
     worker: store::StoreWorker,
 }
@@ -31,23 +31,32 @@ pub async fn build_runtime(config: &Config) -> Result<Runtime> {
         )
         .context("failed to clean dashboard database")?;
     let worker =
-        store::StoreWorker::start(store.clone(), u64::from(config.dashboard.retention_days));
+        store::StoreWorker::start(store.clone(), u64::from(config.dashboard.retention_days))?;
     let built = match crate::build_pipeline(config, worker.recorder()).await {
         Ok(built) => built,
         Err(error) => {
-            shutdown_worker(worker).await?;
+            shutdown_worker(worker).await;
             return Err(error);
         }
     };
     let http_listener = match tokio::net::TcpListener::bind(config.dashboard.listen).await {
         Ok(listener) => listener,
         Err(error) => {
-            shutdown_worker(worker).await?;
+            shutdown_worker(worker).await;
             return Err(error).with_context(|| {
                 format!(
                     "failed to bind dashboard HTTP server to {}",
                     config.dashboard.listen
                 )
+            });
+        }
+    };
+    let dns_socket = match tokio::net::UdpSocket::bind(config.server.listen).await {
+        Ok(socket) => Arc::new(socket),
+        Err(error) => {
+            shutdown_worker(worker).await;
+            return Err(error).with_context(|| {
+                format!("failed to bind DNS UDP server to {}", config.server.listen)
             });
         }
     };
@@ -58,40 +67,109 @@ pub async fn build_runtime(config: &Config) -> Result<Runtime> {
             upstreams: built.upstream_metrics,
             retention_days: u64::from(config.dashboard.retention_days),
         },
-        dns_listen: config.server.listen,
+        dns_socket,
         pipeline: built.pipeline,
         worker,
     })
 }
 
 impl Runtime {
+    pub fn http_addr(&self) -> std::net::SocketAddr {
+        self.http_listener
+            .local_addr()
+            .expect("bound HTTP listener has a local address")
+    }
+
+    pub fn dns_addr(&self) -> std::net::SocketAddr {
+        self.dns_socket
+            .local_addr()
+            .expect("bound DNS socket has a local address")
+    }
+
     pub async fn run(self) -> Result<()> {
+        self.run_until(std::future::pending()).await
+    }
+
+    pub async fn run_until<F>(self, external_shutdown: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()>,
+    {
         let Runtime {
             http_listener,
             http_state,
-            dns_listen,
+            dns_socket,
             pipeline,
             worker,
         } = self;
-        tracing::info!(listen = %http_listener.local_addr()?, "dashboard HTTP server starting");
-        tracing::info!(listen = %dns_listen, "DNS UDP server starting");
-        let result = tokio::select! {
-            result = http::serve(http_listener, http_state) => {
-                result.context("dashboard HTTP server stopped")
-            }
-            result = crate::server::run_udp(dns_listen, pipeline) => {
-                result.context("DNS UDP server stopped")
+        let http_addr = http_listener.local_addr()?;
+        let dns_addr = dns_socket.local_addr()?;
+        tracing::warn!(listen = %http_addr, "dashboard HTTP server starting");
+        tracing::warn!(listen = %dns_addr, "DNS UDP server starting");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let http_shutdown = wait_for_shutdown(shutdown_rx.clone());
+        let dns_shutdown = wait_for_shutdown(shutdown_rx);
+        let mut http = Box::pin(http::serve_until(http_listener, http_state, http_shutdown));
+        let mut dns = Box::pin(crate::server::run_udp_socket_until(
+            dns_socket,
+            pipeline,
+            dns_shutdown,
+        ));
+        tokio::pin!(external_shutdown);
+        enum First {
+            Http(std::io::Result<()>),
+            Dns(Result<()>),
+            Shutdown,
+        }
+        let first = tokio::select! {
+            result = &mut http => First::Http(result),
+            result = &mut dns => First::Dns(result),
+            () = &mut external_shutdown => First::Shutdown,
+        };
+        let _ = shutdown_tx.send(true);
+        let wait_remaining = async {
+            match &first {
+                First::Http(_) => dns.await.map_err(|error| anyhow::anyhow!(error)),
+                First::Dns(_) => http.await.map_err(|error| anyhow::anyhow!(error)),
+                First::Shutdown => {
+                    let (http_result, dns_result) = tokio::join!(http, dns);
+                    http_result?;
+                    dns_result
+                }
             }
         };
-        shutdown_worker(worker).await?;
-        result
+        match tokio::time::timeout(std::time::Duration::from_secs(2), wait_remaining).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("service shutdown failed: {error:#}"),
+            Err(_) => tracing::warn!("service shutdown did not complete within 2s"),
+        }
+        shutdown_worker(worker).await;
+        match first {
+            First::Http(result) => {
+                service_result(result.map_err(anyhow::Error::from), "dashboard HTTP server")
+            }
+            First::Dns(result) => service_result(result, "DNS UDP server"),
+            First::Shutdown => Ok(()),
+        }
     }
 }
 
-async fn shutdown_worker(worker: store::StoreWorker) -> Result<()> {
-    tokio::task::spawn_blocking(move || worker.shutdown())
-        .await
-        .context("dashboard store worker shutdown task failed")
+fn service_result(result: Result<()>, service: &str) -> Result<()> {
+    match result {
+        Ok(()) => anyhow::bail!("{service} stopped unexpectedly"),
+        Err(error) => Err(error).with_context(|| format!("{service} stopped")),
+    }
+}
+
+async fn wait_for_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    if !*shutdown.borrow() {
+        let _ = shutdown.changed().await;
+    }
+}
+
+async fn shutdown_worker(worker: store::StoreWorker) {
+    if let Err(error) = tokio::task::spawn_blocking(move || worker.shutdown()).await {
+        tracing::warn!("dashboard store worker shutdown task failed: {error}");
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -156,3 +234,23 @@ impl Recorder {
 pub mod http;
 pub mod store;
 pub mod upstreams;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn service_completion_without_shutdown_is_an_error() {
+        let error = super::service_result(Ok(()), "dashboard HTTP server").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "dashboard HTTP server stopped unexpectedly"
+        );
+    }
+
+    #[test]
+    fn service_error_keeps_its_original_cause() {
+        let error = super::service_result(Err(anyhow::anyhow!("socket failure")), "DNS UDP server")
+            .unwrap_err();
+        assert_eq!(error.to_string(), "DNS UDP server stopped");
+        assert_eq!(error.root_cause().to_string(), "socket failure");
+    }
+}

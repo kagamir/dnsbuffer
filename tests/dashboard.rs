@@ -123,19 +123,35 @@ async fn runtime_build_fails_before_dns_when_http_address_is_occupied() {
 }
 
 #[tokio::test]
-async fn runtime_returns_error_when_dns_service_stops() {
+async fn runtime_build_fails_when_dns_address_is_occupied() {
     let occupied = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let (guard, _store) = test_store("runtime-dns-exit").await;
     let mut config = runtime_config(guard.path());
     config.server.listen = occupied.local_addr().unwrap();
-    let runtime = build_runtime(&config).await.unwrap();
 
-    let error = tokio::time::timeout(std::time::Duration::from_secs(1), runtime.run())
-        .await
-        .expect("runtime must stop when DNS fails")
-        .unwrap_err();
+    let error = build_runtime(&config).await.unwrap_err();
 
-    assert!(error.to_string().contains("DNS UDP server stopped"));
+    assert!(error.to_string().contains("failed to bind DNS UDP server"));
+}
+
+#[tokio::test]
+async fn runtime_exposes_prebound_ephemeral_addresses_and_shuts_down_cleanly() {
+    let (guard, _store) = test_store("runtime-addresses").await;
+    let runtime = build_runtime(&runtime_config(guard.path())).await.unwrap();
+
+    assert_ne!(runtime.http_addr().port(), 0);
+    assert_ne!(runtime.dns_addr().port(), 0);
+    let http_addr = runtime.http_addr();
+    let dns_addr = runtime.dns_addr();
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(runtime.run_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    tokio::net::TcpStream::connect(http_addr).await.unwrap();
+    tokio::net::UdpSocket::bind(dns_addr).await.unwrap_err();
+    shutdown.send(()).unwrap();
+    running.await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -159,7 +175,7 @@ async fn complete_pipeline_persists_query_details_aggregates_and_exposes_metrics
             .unwrap();
     });
     let (guard, store) = test_store("complete-pipeline").await;
-    let worker = StoreWorker::start(store, 7);
+    let worker = StoreWorker::start(store, 7).unwrap();
     let config: Config = toml::from_str(&format!(
         r#"
         [server]
@@ -221,6 +237,111 @@ async fn complete_pipeline_persists_query_details_aggregates_and_exposes_metrics
     tokio::task::spawn_blocking(move || worker.shutdown())
         .await
         .unwrap();
+}
+
+async fn http_get_json(addr: std::net::SocketAddr, path: &str) -> Value {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let response = String::from_utf8(response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+}
+
+#[tokio::test]
+async fn runtime_serves_dns_persists_to_http_and_drains_writer_on_shutdown() {
+    let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        let (length, peer) = upstream.recv_from(&mut buffer).await.unwrap();
+        let query = hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap();
+        let mut response = hickory_proto::op::Message::new(
+            query.metadata.id,
+            hickory_proto::op::MessageType::Response,
+            query.metadata.op_code,
+        );
+        response.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+        response.queries = query.queries;
+        upstream
+            .send_to(&response.to_vec().unwrap(), peer)
+            .await
+            .unwrap();
+    });
+    let database = TestDatabase(std::env::temp_dir().join(format!(
+        "dnsbuffer-runtime-e2e-{}-{}.db",
+        std::process::id(),
+        rand::random::<u64>()
+    )));
+    assert!(!database.path().exists());
+    let mut config = runtime_config(database.path());
+    config.upstream = vec![dnsbuffer::config::UpstreamConfig::Plain {
+        addr: upstream_addr,
+    }];
+    let runtime = build_runtime(&config).await.unwrap();
+    let http_addr = runtime.http_addr();
+    let dns_addr = runtime.dns_addr();
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+    let running = tokio::spawn(runtime.run_until(async move {
+        let _ = shutdown_rx.await;
+    }));
+
+    let response = super_udp_query(dns_addr, "runtime.example.").await;
+    assert_eq!(
+        response.metadata.response_code,
+        hickory_proto::op::ResponseCode::NoError
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let queries = http_get_json(http_addr, "/api/dashboard/queries").await;
+        if queries["total"] == 1 {
+            assert_eq!(queries["records"][0]["domain"], "runtime.example");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "query was not exposed by HTTP"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    shutdown.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), running)
+        .await
+        .expect("runtime shutdown timed out")
+        .unwrap()
+        .unwrap();
+}
+
+async fn super_udp_query(addr: std::net::SocketAddr, domain: &str) -> hickory_proto::op::Message {
+    let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut query = hickory_proto::op::Message::query();
+    let mut question = hickory_proto::op::Query::new();
+    question.set_name(domain.parse().unwrap());
+    question.set_query_type(hickory_proto::rr::RecordType::A);
+    query.add_query(question);
+    client
+        .send_to(&query.to_vec().unwrap(), addr)
+        .await
+        .unwrap();
+    let mut buffer = [0; 4096];
+    let (length, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.recv_from(&mut buffer),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    hickory_proto::op::Message::from_vec(&buffer[..length]).unwrap()
 }
 
 fn event(domain: &str, ips: &[&str]) -> QueryEvent {

@@ -9,21 +9,41 @@ use crate::pipeline::Pipeline;
 
 /// 监听 UDP 并服务 DNS 查询，直到进程退出。
 pub async fn run_udp(listen: SocketAddr, pipeline: Arc<Pipeline>) -> Result<()> {
-    let sock = Arc::new(
+    let socket = Arc::new(
         UdpSocket::bind(listen)
             .await
             .with_context(|| format!("binding UDP {listen}"))?,
     );
-    tracing::warn!("listening on udp {listen}");
+    tracing::warn!(listen = %socket.local_addr()?, "DNS UDP server starting");
+    run_udp_socket(socket, pipeline).await
+}
+
+pub async fn run_udp_socket(socket: Arc<UdpSocket>, pipeline: Arc<Pipeline>) -> Result<()> {
+    run_udp_socket_until(socket, pipeline, std::future::pending()).await
+}
+
+pub async fn run_udp_socket_until<F>(
+    socket: Arc<UdpSocket>,
+    pipeline: Arc<Pipeline>,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::pin!(shutdown);
 
     let mut buf = vec![0u8; 65535];
     loop {
-        let (n, peer) = sock.recv_from(&mut buf).await.context("recv_from")?;
+        let received = tokio::select! {
+            result = socket.recv_from(&mut buf) => result,
+            () = &mut shutdown => return Ok(()),
+        };
+        let (n, peer) = received.context("recv_from")?;
         let data = buf[..n].to_vec();
-        let sock = sock.clone();
+        let socket = socket.clone();
         let pipeline = pipeline.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_packet(&data, peer, &sock, &pipeline).await {
+            if let Err(e) = handle_packet(&data, peer, &socket, &pipeline).await {
                 tracing::info!("error handling packet from {peer}: {e:#}");
             }
         });
@@ -47,7 +67,7 @@ async fn handle_packet(
 
 #[cfg(test)]
 mod tests {
-    use super::run_udp;
+    use super::run_udp_socket_until;
     use crate::resolver::Resolver;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -95,16 +115,16 @@ mod tests {
             query_timeout: Duration::from_secs(5),
             recorder: crate::dashboard::Recorder::disabled(),
         });
-        // 绑定随机端口获取地址，再交给 run_udp。
-        let listen: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let bound = UdpSocket::bind(listen).await.unwrap();
-        let addr = bound.local_addr().unwrap();
-        drop(bound); // 释放端口给 run_udp 重新绑定
-        tokio::spawn(async move {
-            run_udp(addr, std::sync::Arc::new(pipeline)).await.unwrap();
-        });
-        // 给 server 一点启动时间
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let socket = std::sync::Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = socket.local_addr().unwrap();
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(run_udp_socket_until(
+            socket,
+            std::sync::Arc::new(pipeline),
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.connect(addr).await.unwrap();
@@ -120,5 +140,7 @@ mod tests {
         let resp = Message::from_vec(&buf[..n]).unwrap();
         assert_eq!(resp.metadata.id, 0xABCD);
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+        shutdown.send(()).unwrap();
+        server.await.unwrap().unwrap();
     }
 }

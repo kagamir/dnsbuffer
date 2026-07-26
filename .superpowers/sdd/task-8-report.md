@@ -21,3 +21,24 @@ Verification:
 - `cargo test --no-run`: passed.
 - `cargo test -- --nocapture`: passed, 133 tests total, 0 failed.
 - `git diff --check`: passed.
+
+### Review Fixes
+
+- Runtime now pre-binds both TCP and UDP sockets and exposes their actual `port = 0` addresses through `http_addr()` and `dns_addr()`.
+- Added graceful HTTP shutdown and cancellable UDP serving. `Runtime::run_until` signals the peer service when one service exits or external shutdown is requested, waits up to two seconds, then drains the writer without replacing the original service result.
+- `StoreWorker::start` now propagates thread spawn failures through `Result` rather than panicking.
+- `main` uses Ctrl-C as the external shutdown trigger.
+- Added a real Runtime composition test starting from a nonexistent SQLite path, querying the pre-bound UDP address through a mock upstream, polling the real HTTP API until the event appears, and explicitly shutting down the runtime.
+
+Review TDD evidence:
+
+- RED: pre-bound address, `run_until`, cancellable UDP, and fallible worker tests failed to compile because the interfaces did not exist.
+- RED: service completion test failed because normal service termination was accepted as success.
+- GREEN: runtime, dashboard, forwarding, and full test suites passed after implementation.
+
+Review verification:
+
+- `cargo test --no-run`: passed.
+- `cargo test --test dashboard -- --nocapture`: 13 passed, 0 failed.
+- `cargo test --test forwarding -- --nocapture`: 5 passed, 0 failed.
+- `cargo test -- --nocapture`: 137 passed, 0 failed.

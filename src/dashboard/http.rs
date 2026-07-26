@@ -39,6 +39,19 @@ pub async fn serve(listener: tokio::net::TcpListener, state: HttpState) -> std::
     axum::serve(listener, router(state)).await
 }
 
+pub async fn serve_until<F>(
+    listener: tokio::net::TcpListener,
+    state: HttpState,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown)
+        .await
+}
+
 async fn index() -> Response {
     asset(
         "text/html; charset=utf-8",

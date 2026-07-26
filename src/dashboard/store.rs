@@ -29,7 +29,7 @@ pub struct StoreWorker {
 }
 
 impl StoreWorker {
-    pub fn start(store: Store, retention_days: u64) -> Self {
+    pub fn start(store: Store, retention_days: u64) -> Result<Self> {
         let (recorder, receiver) = Recorder::channel(WORKER_CAPACITY);
         let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
         let (stopped_tx, stopped) = std::sync::mpsc::sync_channel(1);
@@ -39,13 +39,13 @@ impl StoreWorker {
                 run_store_worker(store, retention_days, receiver, shutdown_rx);
                 let _ = stopped_tx.send(());
             })
-            .expect("failed to start query history store worker");
-        Self {
+            .context("failed to start query history store worker")?;
+        Ok(Self {
             recorder: Some(recorder),
             shutdown: Some(shutdown),
             thread: Some(thread),
             stopped: Some(stopped),
-        }
+        })
     }
 
     pub fn recorder(&self) -> Recorder {
@@ -930,7 +930,7 @@ mod tests {
     fn worker_flushes_events_and_stops_when_recorder_closes() {
         let (_guard, store) = test_store("worker-flush");
         let path = store.path.clone();
-        let worker = StoreWorker::start(store, 7);
+        let worker = StoreWorker::start(store, 7).unwrap();
         worker
             .recorder()
             .try_record(event(1_753_488_000_000, "worker.example", &["192.0.2.1"]));
@@ -947,7 +947,7 @@ mod tests {
     fn explicit_shutdown_closes_clones_flushes_and_returns_promptly() {
         let (_guard, store) = test_store("worker-explicit-shutdown");
         let path = store.path.clone();
-        let worker = StoreWorker::start(store, 7);
+        let worker = StoreWorker::start(store, 7).unwrap();
         let recorder = worker.recorder();
         recorder.try_record(event(1_753_488_000_000, "shutdown.example", &["192.0.2.2"]));
 
@@ -968,7 +968,7 @@ mod tests {
     fn dropping_last_detached_recorder_returns_within_deadline() {
         let (_guard, store) = test_store("worker-detached-drop");
         let path = store.path.clone();
-        let recorder = StoreWorker::start(store, 7).detach();
+        let recorder = StoreWorker::start(store, 7).unwrap().detach();
         std::thread::sleep(Duration::from_millis(50));
         recorder.try_record(event(1_753_488_000_000, "detached.example", &["192.0.2.3"]));
 

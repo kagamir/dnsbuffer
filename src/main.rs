@@ -27,5 +27,12 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    dashboard::build_runtime(&cfg).await?.run().await
+    dashboard::build_runtime(&cfg)
+        .await?
+        .run_until(async {
+            if let Err(error) = tokio::signal::ctrl_c().await {
+                tracing::warn!("failed to listen for shutdown signal: {error}");
+            }
+        })
+        .await
 }
