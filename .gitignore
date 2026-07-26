@@ -2,3 +2,4 @@
 /.worktrees
 superpowers
 config.toml
+*.db
