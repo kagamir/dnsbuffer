@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::{Buf, Bytes};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -28,7 +28,12 @@ pub struct H3Conn {
 }
 
 impl H3Conn {
-    pub fn new(host: String, port: u16, ips: Vec<IpAddr>, tls: rustls::ClientConfig) -> Result<Self> {
+    pub fn new(
+        host: String,
+        port: u16,
+        ips: Vec<IpAddr>,
+        tls: rustls::ClientConfig,
+    ) -> Result<Self> {
         if ips.is_empty() {
             bail!("H3Conn requires at least one ip for {host}");
         }
@@ -38,7 +43,9 @@ impl H3Conn {
         let mut transport = quinn::TransportConfig::default();
         transport.keep_alive_interval(Some(KEEP_ALIVE_INTERVAL));
         transport.max_idle_timeout(Some(
-            MAX_IDLE_TIMEOUT.try_into().context("QUIC idle timeout out of range")?,
+            MAX_IDLE_TIMEOUT
+                .try_into()
+                .context("QUIC idle timeout out of range")?,
         ));
         client_config.transport_config(Arc::new(transport));
         // 列表含任意 v6 就绑 [::]（quinn 会把 v4 目标映射为 v6-mapped 一并可达）；
@@ -99,7 +106,10 @@ impl H3Conn {
             let mut sender = {
                 let mut guard = self.state.lock().await;
                 // 已死连接（idle 超时/对端关闭）直接丢弃，避免拿着它死等
-                if guard.as_ref().is_some_and(|s| s.conn.close_reason().is_some()) {
+                if guard
+                    .as_ref()
+                    .is_some_and(|s| s.conn.close_reason().is_some())
+                {
                     *guard = None;
                 }
                 if guard.is_none() {
@@ -170,7 +180,9 @@ pub(crate) mod tests {
         spawn_mock_h3_server_at("127.0.0.1:0").await
     }
 
-    pub(crate) async fn spawn_mock_h3_server_at(bind: &str) -> (SocketAddr, CertificateDer<'static>) {
+    pub(crate) async fn spawn_mock_h3_server_at(
+        bind: &str,
+    ) -> (SocketAddr, CertificateDer<'static>) {
         spawn_mock_h3_server_with_cap(bind, usize::MAX).await
     }
 
@@ -197,8 +209,7 @@ pub(crate) mod tests {
         let server_config = quinn::ServerConfig::with_crypto(Arc::new(
             quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap(),
         ));
-        let endpoint =
-            quinn::Endpoint::server(server_config, bind.parse().unwrap()).unwrap();
+        let endpoint = quinn::Endpoint::server(server_config, bind.parse().unwrap()).unwrap();
         let addr = endpoint.local_addr().unwrap();
 
         tokio::spawn(async move {
@@ -211,7 +222,9 @@ pub(crate) mod tests {
                             .unwrap();
                     let mut served = 0usize;
                     while served < max_requests_per_conn {
-                        let Ok(Some(resolver)) = h3_conn.accept().await else { break };
+                        let Ok(Some(resolver)) = h3_conn.accept().await else {
+                            break;
+                        };
                         let (_req, mut stream) = resolver.resolve_request().await.unwrap();
                         let mut body = Vec::new();
                         while let Some(mut chunk) = stream.recv_data().await.unwrap() {

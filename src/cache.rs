@@ -35,7 +35,10 @@ pub struct Cache {
 impl Cache {
     /// `max_entries` 会被夹紧到 ≥1（0 会导致缓存永远不可能命中）。
     pub fn new(max_entries: usize) -> Self {
-        Self { map: Mutex::new(LinkedHashMap::new()), max_entries: max_entries.max(1) }
+        Self {
+            map: Mutex::new(LinkedHashMap::new()),
+            max_entries: max_entries.max(1),
+        }
     }
 
     /// 命中时克隆报文并把 id 改写为当前查询 id，同时把条目刷新为最近使用（LRU）。
@@ -51,12 +54,7 @@ impl Cache {
 
     /// TTL = answers 最小 TTL（无 answers 用 60s）。
     pub fn put(&self, key: CacheKey, message: Message) {
-        let ttl = message
-            .answers
-            .iter()
-            .map(|r| r.ttl)
-            .min()
-            .unwrap_or(60);
+        let ttl = message.answers.iter().map(|r| r.ttl).min().unwrap_or(60);
         let entry = CacheEntry {
             message,
             expires_at: Instant::now() + Duration::from_secs(u64::from(ttl)),
@@ -116,7 +114,10 @@ mod tests {
     }
 
     fn key(name: &str) -> CacheKey {
-        CacheKey { name: name.trim_end_matches('.').to_lowercase(), qtype: 1 }
+        CacheKey {
+            name: name.trim_end_matches('.').to_lowercase(),
+            qtype: 1,
+        }
     }
 
     #[test]
@@ -133,7 +134,10 @@ mod tests {
         let cache = Cache::new(10);
         cache.put(key("stale.com."), response(1, "stale.com.", 0)); // TTL 0 → 立即过期
         let (_, expired) = cache.get(&key("stale.com."), 2).expect("optimistic hit");
-        assert!(expired, "ttl 0 entry must be flagged expired but still returned");
+        assert!(
+            expired,
+            "ttl 0 entry must be flagged expired but still returned"
+        );
     }
 
     #[test]
@@ -144,7 +148,10 @@ mod tests {
         // 读 a——LRU 下 a 变为最近使用，b 成为最久未用
         cache.get(&key("a.com."), 7);
         cache.put(key("c.com."), response(3, "c.com.", 300));
-        assert!(cache.get(&key("b.com."), 7).is_none(), "b 最久未用，必须最先被逐出");
+        assert!(
+            cache.get(&key("b.com."), 7).is_none(),
+            "b 最久未用，必须最先被逐出"
+        );
         assert!(cache.get(&key("a.com."), 7).is_some(), "a 被读过，应存活");
         assert!(cache.get(&key("c.com."), 7).is_some());
     }
@@ -171,7 +178,10 @@ mod tests {
         map.insert(key("a.com."), entry("a.com."));
         map.insert(key("b.com."), entry("b.com."));
         // 用不可能满足的容量模拟 OS 拒绝内存申请：应先按 LRU 逐出，逐空仍失败则放弃
-        assert!(!reserve_or_evict(&mut map, isize::MAX as usize), "impossible reservation fails");
+        assert!(
+            !reserve_or_evict(&mut map, isize::MAX as usize),
+            "impossible reservation fails"
+        );
         assert!(map.is_empty(), "entries evicted while trying to make room");
         map.insert(key("c.com."), entry("c.com."));
         assert!(reserve_or_evict(&mut map, 1), "normal reservation succeeds");

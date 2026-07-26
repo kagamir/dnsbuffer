@@ -24,22 +24,42 @@ mod tests {
 
     #[test]
     fn v6_moves_ahead_when_preferred() {
-        let mut ips = vec![ip("1.1.1.1"), ip("2606:4700::1111"), ip("8.8.8.8"), ip("2001:4860:4860::8888")];
+        let mut ips = vec![
+            ip("1.1.1.1"),
+            ip("2606:4700::1111"),
+            ip("8.8.8.8"),
+            ip("2001:4860:4860::8888"),
+        ];
         sort_by_family(&mut ips, true);
         assert_eq!(
             ips,
-            vec![ip("2606:4700::1111"), ip("2001:4860:4860::8888"), ip("1.1.1.1"), ip("8.8.8.8")],
+            vec![
+                ip("2606:4700::1111"),
+                ip("2001:4860:4860::8888"),
+                ip("1.1.1.1"),
+                ip("8.8.8.8")
+            ],
             "IPv6 first, original order preserved within each family"
         );
     }
 
     #[test]
     fn v4_moves_ahead_by_default() {
-        let mut ips = vec![ip("2606:4700::1111"), ip("1.1.1.1"), ip("2001:4860:4860::8888"), ip("8.8.8.8")];
+        let mut ips = vec![
+            ip("2606:4700::1111"),
+            ip("1.1.1.1"),
+            ip("2001:4860:4860::8888"),
+            ip("8.8.8.8"),
+        ];
         sort_by_family(&mut ips, false);
         assert_eq!(
             ips,
-            vec![ip("1.1.1.1"), ip("8.8.8.8"), ip("2606:4700::1111"), ip("2001:4860:4860::8888")],
+            vec![
+                ip("1.1.1.1"),
+                ip("8.8.8.8"),
+                ip("2606:4700::1111"),
+                ip("2001:4860:4860::8888")
+            ],
             "IPv4 first by default, original order preserved within each family"
         );
     }

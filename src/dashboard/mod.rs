@@ -147,7 +147,10 @@ impl Runtime {
         match tokio::time::timeout(SERVICE_SHUTDOWN_TIMEOUT, wait_remaining).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!("service shutdown failed: {error:#}"),
-            Err(_) => tracing::warn!("service shutdown did not complete within 2s"),
+            Err(_) => tracing::warn!(
+                timeout_ms = SERVICE_SHUTDOWN_TIMEOUT.as_millis(),
+                "service shutdown did not complete before timeout"
+            ),
         }
         shutdown_worker(worker).await;
         match first {

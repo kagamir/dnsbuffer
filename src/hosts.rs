@@ -55,7 +55,11 @@ impl HostsMap {
         let name = normalize(&q.name().to_string());
         let addrs = self.find(&name)?;
 
-        let mut resp = Message::new(query.metadata.id, MessageType::Response, query.metadata.op_code);
+        let mut resp = Message::new(
+            query.metadata.id,
+            MessageType::Response,
+            query.metadata.op_code,
+        );
         resp.metadata.response_code = ResponseCode::NoError;
         resp.metadata.recursion_desired = query.metadata.recursion_desired;
         resp.metadata.recursion_available = true;
@@ -66,14 +70,22 @@ impl HostsMap {
             RecordType::A => {
                 for ip in addrs {
                     if let IpAddr::V4(v4) = ip {
-                        resp.add_answer(Record::from_rdata(owner.clone(), HOSTS_TTL, RData::A(A(*v4))));
+                        resp.add_answer(Record::from_rdata(
+                            owner.clone(),
+                            HOSTS_TTL,
+                            RData::A(A(*v4)),
+                        ));
                     }
                 }
             }
             RecordType::AAAA => {
                 for ip in addrs {
                     if let IpAddr::V6(v6) = ip {
-                        resp.add_answer(Record::from_rdata(owner.clone(), HOSTS_TTL, RData::AAAA(AAAA(*v6))));
+                        resp.add_answer(Record::from_rdata(
+                            owner.clone(),
+                            HOSTS_TTL,
+                            RData::AAAA(AAAA(*v6)),
+                        ));
                     }
                 }
             }
@@ -97,7 +109,10 @@ mod tests {
                 name: "router.local".into(),
                 addrs: vec!["192.168.1.1".parse().unwrap(), "fd00::1".parse().unwrap()],
             },
-            HostEntry { name: "*.lab.example".into(), addrs: vec!["10.0.0.7".parse().unwrap()] },
+            HostEntry {
+                name: "*.lab.example".into(),
+                addrs: vec!["10.0.0.7".parse().unwrap()],
+            },
         ]
     }
 
@@ -113,26 +128,41 @@ mod tests {
     #[test]
     fn exact_a_and_aaaa() {
         let h = HostsMap::from_entries(&entries());
-        let resp = h.lookup(&query("Router.Local.", RecordType::A)).expect("hit");
+        let resp = h
+            .lookup(&query("Router.Local.", RecordType::A))
+            .expect("hit");
         assert_eq!(resp.metadata.id, 0x1234);
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         assert_eq!(resp.answers.len(), 1, "only the v4 addr for A query");
-        let resp6 = h.lookup(&query("router.local.", RecordType::AAAA)).expect("hit");
+        let resp6 = h
+            .lookup(&query("router.local.", RecordType::AAAA))
+            .expect("hit");
         assert_eq!(resp6.answers.len(), 1, "only the v6 addr for AAAA query");
     }
 
     #[test]
     fn wildcard_matches_subdomains_only() {
         let h = HostsMap::from_entries(&entries());
-        assert!(h.lookup(&query("box.lab.example.", RecordType::A)).is_some());
-        assert!(h.lookup(&query("a.b.lab.example.", RecordType::A)).is_some());
-        assert!(h.lookup(&query("lab.example.", RecordType::A)).is_none(), "wildcard 不匹配基域");
+        assert!(
+            h.lookup(&query("box.lab.example.", RecordType::A))
+                .is_some()
+        );
+        assert!(
+            h.lookup(&query("a.b.lab.example.", RecordType::A))
+                .is_some()
+        );
+        assert!(
+            h.lookup(&query("lab.example.", RecordType::A)).is_none(),
+            "wildcard 不匹配基域"
+        );
     }
 
     #[test]
     fn hit_without_family_is_nodata() {
         let h = HostsMap::from_entries(&entries());
-        let resp = h.lookup(&query("box.lab.example.", RecordType::AAAA)).expect("name hit");
+        let resp = h
+            .lookup(&query("box.lab.example.", RecordType::AAAA))
+            .expect("name hit");
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         assert!(resp.answers.is_empty(), "no v6 for wildcard entry → NODATA");
     }

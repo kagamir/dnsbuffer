@@ -12,7 +12,7 @@ COPY dnsbuffer /usr/local/bin/dnsbuffer
 # 内置一份示例配置作默认值；生产环境请用 -v 挂载自己的 config.toml 覆盖它
 COPY config.example.toml /etc/dnsbuffer/config.toml
 
-# DNS 服务默认监听 UDP 53（见 config.example.toml 的 server.listen）
-EXPOSE 53/udp
+# DNS 服务默认监听 UDP 53，仪表板默认监听 TCP 8080（见 config.example.toml）
+EXPOSE 53/udp 8080/tcp
 
 ENTRYPOINT ["/usr/local/bin/dnsbuffer", "--config", "/etc/dnsbuffer/config.toml"]

@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use hickory_proto::op::Message;
 use std::sync::{Arc, Mutex};
@@ -167,13 +167,13 @@ mod tests {
     use super::*;
     use crate::dashboard::upstreams::UpstreamMetricsBuilder;
     use crate::resolver::Resolver;
-    use anyhow::{anyhow, Result};
+    use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RecordType};
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingOk(AtomicUsize);
     #[async_trait]

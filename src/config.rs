@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -68,7 +68,9 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: default_log_level() }
+        Self {
+            level: default_log_level(),
+        }
     }
 }
 
@@ -281,7 +283,10 @@ mod tests {
             listen = "127.0.0.1:5300"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.validate().is_err(), "empty upstream must fail validation");
+        assert!(
+            cfg.validate().is_err(),
+            "empty upstream must fail validation"
+        );
     }
 
     #[test]
@@ -296,7 +301,12 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         match &cfg.upstream[0] {
-            UpstreamConfig::Doh { url, ech, http3, ip } => {
+            UpstreamConfig::Doh {
+                url,
+                ech,
+                http3,
+                ip,
+            } => {
                 assert_eq!(url, "https://dns.example/dns-query");
                 assert!(ech.is_empty());
                 assert!(!*http3, "http3 defaults to false (opt-in via http3 = true)");
@@ -349,10 +359,19 @@ mod tests {
 
     #[test]
     fn split_domain_port_defaults_to_853() {
-        assert_eq!(split_domain_port("dns.quad9.net").unwrap(), ("dns.quad9.net".into(), 853));
-        assert_eq!(split_domain_port("dns.quad9.net:8853").unwrap(), ("dns.quad9.net".into(), 8853));
+        assert_eq!(
+            split_domain_port("dns.quad9.net").unwrap(),
+            ("dns.quad9.net".into(), 853)
+        );
+        assert_eq!(
+            split_domain_port("dns.quad9.net:8853").unwrap(),
+            ("dns.quad9.net".into(), 8853)
+        );
         assert!(split_domain_port("dns.quad9.net:notaport").is_err());
-        assert!(split_domain_port("dns.quad9.net:99999").is_err(), "port out of u16 range");
+        assert!(
+            split_domain_port("dns.quad9.net:99999").is_err(),
+            "port out of u16 range"
+        );
     }
 
     #[test]
@@ -381,7 +400,10 @@ mod tests {
             addr = "1.1.1.1:53"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.ecs.fixed_subnet.is_none(), "no fixed_subnet means ECS off");
+        assert!(
+            cfg.ecs.fixed_subnet.is_none(),
+            "no fixed_subnet means ECS off"
+        );
         let with = r#"
             [server]
             listen = "127.0.0.1:5300"
@@ -412,7 +434,10 @@ mod tests {
             url = "https://bootstrap.example/dns-query"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.validate().is_err(), "bootstrap doh without ip must fail");
+        assert!(
+            cfg.validate().is_err(),
+            "bootstrap doh without ip must fail"
+        );
     }
 
     #[test]
@@ -427,8 +452,14 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
-        assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
-        assert_eq!(cfg.server.hedged_retry_ms, 1_000, "hedged retry interval defaults to 1s");
+        assert_eq!(
+            cfg.server.upstream_timeout_ms, 5_000,
+            "primary upstream budget defaults to 5s"
+        );
+        assert_eq!(
+            cfg.server.hedged_retry_ms, 1_000,
+            "hedged retry interval defaults to 1s"
+        );
     }
 
     #[test]
@@ -443,8 +474,8 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(&base.replace("{extra}", "")).expect("parse");
         assert_eq!(cfg.log.level, "info");
-        let cfg: Config = toml::from_str(&base.replace("{extra}", "[log]\nlevel = \"warn\"\n"))
-            .expect("parse");
+        let cfg: Config =
+            toml::from_str(&base.replace("{extra}", "[log]\nlevel = \"warn\"\n")).expect("parse");
         assert_eq!(cfg.log.level, "warn");
     }
 

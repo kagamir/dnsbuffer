@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use hickory_proto::op::Message;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -16,22 +16,42 @@ pub fn mask_ip(ip: IpAddr, prefix: u8) -> EcsSubnet {
     match ip {
         IpAddr::V4(v4) => {
             let bits = u32::from(v4);
-            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-            EcsSubnet { addr: IpAddr::V4(Ipv4Addr::from(bits & mask)), prefix }
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            EcsSubnet {
+                addr: IpAddr::V4(Ipv4Addr::from(bits & mask)),
+                prefix,
+            }
         }
         IpAddr::V6(v6) => {
             let bits = u128::from(v6);
-            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
-            EcsSubnet { addr: IpAddr::V6(Ipv6Addr::from(bits & mask)), prefix }
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            EcsSubnet {
+                addr: IpAddr::V6(Ipv6Addr::from(bits & mask)),
+                prefix,
+            }
         }
     }
 }
 
 /// 解析 `"1.2.3.0/24"` 形式的子网；前缀超界或格式非法 bail。
 pub fn parse_subnet(s: &str) -> Result<EcsSubnet> {
-    let (addr, prefix) = s.split_once('/').with_context(|| format!("invalid subnet {s}"))?;
-    let addr: IpAddr = addr.parse().with_context(|| format!("invalid subnet addr {s}"))?;
-    let prefix: u8 = prefix.parse().with_context(|| format!("invalid prefix {s}"))?;
+    let (addr, prefix) = s
+        .split_once('/')
+        .with_context(|| format!("invalid subnet {s}"))?;
+    let addr: IpAddr = addr
+        .parse()
+        .with_context(|| format!("invalid subnet addr {s}"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .with_context(|| format!("invalid prefix {s}"))?;
     let max = if addr.is_ipv4() { 32 } else { 128 };
     if prefix > max {
         bail!("prefix /{prefix} out of range for {s}");
@@ -90,13 +110,25 @@ mod tests {
     #[test]
     fn subnet_from_config_uses_fixed_subnet_or_disables() {
         let none = EcsConfig { fixed_subnet: None };
-        assert_eq!(subnet_from_config(&none), None, "no fixed_subnet means ECS off");
-        let some = EcsConfig { fixed_subnet: Some("203.0.113.0/24".into()) };
+        assert_eq!(
+            subnet_from_config(&none),
+            None,
+            "no fixed_subnet means ECS off"
+        );
+        let some = EcsConfig {
+            fixed_subnet: Some("203.0.113.0/24".into()),
+        };
         let subnet = subnet_from_config(&some).expect("valid subnet enables ECS");
         assert_eq!(subnet.addr, IpAddr::from_str("203.0.113.0").unwrap());
         assert_eq!(subnet.prefix, 24);
-        let bad = EcsConfig { fixed_subnet: Some("not-a-subnet".into()) };
-        assert_eq!(subnet_from_config(&bad), None, "invalid subnet warns and disables");
+        let bad = EcsConfig {
+            fixed_subnet: Some("not-a-subnet".into()),
+        };
+        assert_eq!(
+            subnet_from_config(&bad),
+            None,
+            "invalid subnet warns and disables"
+        );
     }
 
     #[test]
@@ -115,7 +147,8 @@ mod tests {
         let decoded = hickory_proto::op::Message::from_vec(&bytes).unwrap();
         let edns = decoded.edns.as_ref().expect("edns present");
         assert!(
-            edns.option(hickory_proto::rr::rdata::opt::EdnsCode::Subnet).is_some(),
+            edns.option(hickory_proto::rr::rdata::opt::EdnsCode::Subnet)
+                .is_some(),
             "ECS option must survive encode/decode"
         );
     }

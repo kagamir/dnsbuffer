@@ -10,9 +10,9 @@ level = "info"           # error | warn | info | debug | trace；RUST_LOG 环境
                          # warn 只看启动信息与配置问题；info 额外显示请求失败/重试
 
 [dashboard]
-listen = "0.0.0.0:8080"
-database_path = "dnsbuffer.db"
-retention_days = 7
+listen = "0.0.0.0:8080"       # 无认证；仅暴露到可信网络，或使用带认证的反向代理
+database_path = "dnsbuffer.db" # 相对路径以进程工作目录为基准；初始化失败将阻止程序启动
+retention_days = 7              # 默认 7 天；0 永久保留；1-15 天按小时趋势，16+ 天按天，0 显示最近 30 天
 
 [cache]
 max_entries = 10000

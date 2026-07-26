@@ -19,7 +19,11 @@ pub struct HedgedResolver {
 
 impl HedgedResolver {
     pub fn new(inner: Arc<dyn Resolver>, interval: Duration, max_wait: Duration) -> Self {
-        Self { inner, interval, max_wait }
+        Self {
+            inner,
+            interval,
+            max_wait,
+        }
     }
 
     fn spawn_attempt(
@@ -154,7 +158,10 @@ mod tests {
             elapsed >= Duration::from_millis(100) && elapsed < Duration::from_secs(1),
             "second attempt should win right after the 100ms hedge interval, took {elapsed:?}"
         );
-        assert!(inner.0.load(Ordering::SeqCst) >= 2, "a parallel attempt was launched");
+        assert!(
+            inner.0.load(Ordering::SeqCst) >= 2,
+            "a parallel attempt was launched"
+        );
     }
 
     #[tokio::test]
@@ -167,7 +174,10 @@ mod tests {
         );
         let start = std::time::Instant::now();
         hedged.resolve(&sample_query()).await.expect("resolves");
-        assert!(start.elapsed() < Duration::from_millis(100), "no hedge wait on the fast path");
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "no hedge wait on the fast path"
+        );
         assert_eq!(inner.0.load(Ordering::SeqCst), 1, "only one attempt fired");
     }
 

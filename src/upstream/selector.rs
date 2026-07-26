@@ -65,7 +65,10 @@ mod tests {
             let roll = i as f64 / 1000.0;
             counts[pick_weighted(&w, roll).unwrap()] += 1;
         }
-        assert!(counts[1] > counts[0] * 5, "9:1 权重应显著偏向索引 1: {counts:?}");
+        assert!(
+            counts[1] > counts[0] * 5,
+            "9:1 权重应显著偏向索引 1: {counts:?}"
+        );
     }
 
     #[test]
@@ -87,7 +90,10 @@ mod tests {
         // roll 极接近 1 且权重量级悬殊，确保不 panic 且返回有效正权重索引
         let w = [1e-300, 1e300, 0.0];
         let idx = pick_weighted(&w, 0.999_999_999_999_999_9).unwrap();
-        assert!(idx == 0 || idx == 1, "must land on a positive-weight index: {idx}");
+        assert!(
+            idx == 0 || idx == 1,
+            "must land on a positive-weight index: {idx}"
+        );
         // 边界值 roll 恰好等于第一权重占比时落入下一桶（严格 < 语义）
         let w2 = [1.0, 3.0];
         assert_eq!(pick_weighted(&w2, 0.25), Some(1));

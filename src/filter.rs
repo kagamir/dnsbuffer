@@ -17,9 +17,7 @@ fn normalize(name: &str) -> String {
 }
 
 fn valid_domain(s: &str) -> bool {
-    !s.is_empty()
-        && !s.contains(['/', '*', '$', '|', '^', ' ', '\t'])
-        && s.contains('.')
+    !s.is_empty() && !s.contains(['/', '*', '$', '|', '^', ' ', '\t']) && s.contains('.')
 }
 
 /// 编译后的规则集：屏蔽域集合 + 例外域集合（都按后缀匹配语义使用）。
@@ -135,7 +133,11 @@ impl Filter {
 
     /// 屏蔽应答：A→0.0.0.0，AAAA→::，其他→NODATA。
     pub fn block_response(&self, query: &Message) -> Message {
-        let mut resp = Message::new(query.metadata.id, MessageType::Response, query.metadata.op_code);
+        let mut resp = Message::new(
+            query.metadata.id,
+            MessageType::Response,
+            query.metadata.op_code,
+        );
         resp.metadata.response_code = ResponseCode::NoError;
         resp.metadata.recursion_desired = query.metadata.recursion_desired;
         resp.metadata.recursion_available = true;
@@ -177,7 +179,12 @@ pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> Rule
                 }
             }
         } else if let Some(url) = &s.url {
-            match tokio::time::timeout(std::time::Duration::from_secs(60), crate::fetch::fetch_url(url, bootstrap)).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                crate::fetch::fetch_url(url, bootstrap),
+            )
+            .await
+            {
                 Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
                 Ok(Err(e)) => {
                     tracing::info!("fetching rules {url} failed: {e:#}");
@@ -203,15 +210,15 @@ pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> Rule
 pub fn spawn_updater(filter: Arc<Filter>, sources: Vec<RuleSource>, bootstrap: Arc<Bootstrap>) {
     let mut min_interval: Option<Duration> = None;
     for s in &sources {
-        if s.url.is_some() {
-            if let Some(iv) = &s.update_interval {
-                match humantime::parse_duration(iv) {
-                    Ok(d) if !d.is_zero() => {
-                        min_interval = Some(min_interval.map_or(d, |m| m.min(d)));
-                    }
-                    Ok(_) => tracing::warn!("zero update_interval ignored"),
-                    Err(e) => tracing::warn!("invalid update_interval {iv}: {e}"),
+        if s.url.is_some()
+            && let Some(iv) = &s.update_interval
+        {
+            match humantime::parse_duration(iv) {
+                Ok(d) if !d.is_zero() => {
+                    min_interval = Some(min_interval.map_or(d, |m| m.min(d)));
                 }
+                Ok(_) => tracing::warn!("zero update_interval ignored"),
+                Err(e) => tracing::warn!("invalid update_interval {iv}: {e}"),
             }
         }
     }
@@ -281,8 +288,14 @@ plain-blocked.dev
     fn exceptions_and_allowlist_win() {
         let f = filter_with(&["whitelisted.tracker.net"]);
         assert!(!f.is_blocked("good.ads.example.com"), "@@ exception wins");
-        assert!(!f.is_blocked("x.good.ads.example.com"), "exception suffix wins");
-        assert!(!f.is_blocked("whitelisted.tracker.net"), "config allowlist wins");
+        assert!(
+            !f.is_blocked("x.good.ads.example.com"),
+            "exception suffix wins"
+        );
+        assert!(
+            !f.is_blocked("whitelisted.tracker.net"),
+            "config allowlist wins"
+        );
         assert!(f.is_blocked("tracker.net"), "non-exempt name still blocked");
     }
 
