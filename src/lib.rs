@@ -46,6 +46,15 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
     let hosts = crate::hosts::HostsMap::from_entries(&config.hosts);
     let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
     let ecs = crate::ecs::subnet_from_config(&config.ecs);
+    #[cfg(not(test))]
+    let recorder = {
+        let store = crate::dashboard::store::Store::open(&config.dashboard.database_path)?;
+        crate::dashboard::store::StoreWorker::start(
+            store,
+            u64::from(config.dashboard.retention_days),
+        )
+        .detach()
+    };
 
     let mut primary = build_group(&config.upstream, config, &bootstrap).await?;
     // 对冲式重试：主上游尝试超过 hedged_retry_ms 未返回即并行再发，0 禁用
@@ -74,6 +83,8 @@ pub async fn build_pipeline(config: &Config) -> Result<Arc<Pipeline>> {
         upstream: resolver,
         ecs,
         query_timeout: std::time::Duration::from_millis(config.server.query_timeout_ms),
+        #[cfg(not(test))]
+        recorder,
     })))
 }
 

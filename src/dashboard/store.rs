@@ -1,17 +1,166 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params, params_from_iter};
 
-use super::QueryEvent;
+use super::{QueryEvent, Recorder};
 
 const SCHEMA_VERSION: i64 = 1;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 const MAX_TREND_BUCKETS: u64 = 10_000;
 const MAX_QUERY_PAGE_SIZE: u64 = 200;
+const WORKER_CAPACITY: usize = 4096;
+const MAX_BATCH_SIZE: usize = 128;
+const BATCH_WAIT: Duration = Duration::from_millis(100);
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub struct StoreWorker {
+    recorder: Option<Recorder>,
+}
+
+pub(crate) struct WorkerShutdown {
+    thread: std::sync::Mutex<Option<JoinHandle<()>>>,
+    stopped: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Drop for WorkerShutdown {
+    fn drop(&mut self) {
+        let stopped = self.stopped.get_mut().expect("worker shutdown mutex poisoned");
+        if stopped.recv_timeout(SHUTDOWN_TIMEOUT).is_ok() {
+            if let Some(thread) = self
+                .thread
+                .get_mut()
+                .expect("worker thread mutex poisoned")
+                .take()
+                && thread.join().is_err()
+            {
+                tracing::warn!("query history store worker panicked during shutdown");
+            }
+        } else {
+            self.thread
+                .get_mut()
+                .expect("worker thread mutex poisoned")
+                .take();
+            tracing::warn!("query history store worker did not stop within {SHUTDOWN_TIMEOUT:?}");
+        }
+    }
+}
+
+impl StoreWorker {
+    pub fn start(store: Store, retention_days: u64) -> Self {
+        let (recorder, receiver) = Recorder::channel(WORKER_CAPACITY);
+        let (stopped_tx, stopped) = std::sync::mpsc::sync_channel(1);
+        let thread = std::thread::Builder::new()
+            .name("dnsbuffer-store".into())
+            .spawn(move || {
+                run_store_worker(store, retention_days, receiver);
+                let _ = stopped_tx.send(());
+            })
+            .expect("failed to start query history store worker");
+        let recorder = recorder.with_worker(WorkerShutdown {
+            thread: std::sync::Mutex::new(Some(thread)),
+            stopped: std::sync::Mutex::new(stopped),
+        });
+        Self { recorder: Some(recorder) }
+    }
+
+    pub fn recorder(&self) -> Recorder {
+        self.recorder
+            .as_ref()
+            .expect("worker has not shut down")
+            .clone()
+    }
+
+    pub fn detach(mut self) -> Recorder {
+        self.recorder.take().expect("worker has not shut down")
+    }
+
+    pub fn shutdown(mut self) {
+        self.stop();
+    }
+
+    fn stop(&mut self) {
+        self.recorder.take();
+    }
+}
+
+impl Drop for StoreWorker {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn run_store_worker(
+    store: Store,
+    retention_days: u64,
+    receiver: tokio::sync::mpsc::Receiver<QueryEvent>,
+) {
+    run_store_worker_with_interval(store, retention_days, receiver, CLEANUP_INTERVAL);
+}
+
+fn run_store_worker_with_interval(
+    store: Store,
+    retention_days: u64,
+    mut receiver: tokio::sync::mpsc::Receiver<QueryEvent>,
+    cleanup_interval: Duration,
+) {
+    if let Err(error) = store.cleanup(retention_days, Utc::now().timestamp_millis()) {
+        tracing::warn!("initial query history cleanup failed: {error:#}");
+    }
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!("query history worker runtime creation failed: {error}");
+            return;
+        }
+    };
+    let mut next_cleanup = Instant::now() + cleanup_interval;
+    loop {
+        let events = runtime.block_on(async {
+            let first = tokio::select! {
+                event = receiver.recv() => event,
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_cleanup)) => None,
+            };
+            let Some(first) = first else {
+                return Some(Vec::new());
+            };
+            let mut events = Vec::with_capacity(MAX_BATCH_SIZE);
+            events.push(first);
+            let deadline = tokio::time::Instant::now() + BATCH_WAIT;
+            while events.len() < MAX_BATCH_SIZE {
+                match tokio::time::timeout_at(deadline, receiver.recv()).await {
+                    Ok(Some(event)) => events.push(event),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            Some(events)
+        });
+        let Some(events) = events else { break };
+        if !events.is_empty() && let Err(error) = store.insert_events(&events) {
+            tracing::warn!(
+                count = events.len(),
+                "writing query history failed: {error:#}"
+            );
+        }
+        if Instant::now() >= next_cleanup {
+            if let Err(error) = store.cleanup(retention_days, Utc::now().timestamp_millis()) {
+                tracing::warn!("periodic query history cleanup failed: {error:#}");
+            }
+            next_cleanup = Instant::now() + cleanup_interval;
+        }
+        if events.is_empty() && receiver.is_closed() {
+            break;
+        }
+    }
+}
 
 #[derive(Debug, serde::Serialize)]
 pub struct TrendResponse {
@@ -115,9 +264,9 @@ impl Store {
 
     pub fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.path)?;
+        conn.busy_timeout(Duration::from_secs(2))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.busy_timeout(Duration::from_secs(2))?;
         Ok(conn)
     }
 
@@ -404,10 +553,11 @@ fn query_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryRecord> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use rusqlite::Connection;
 
-    use super::{QueryEvent, Store};
+    use super::{QueryEvent, Store, StoreWorker, run_store_worker_with_interval};
 
     const HOUR_MS: i64 = 3_600_000;
     const DAY_MS: i64 = 86_400_000;
@@ -724,5 +874,42 @@ mod tests {
         let result = std::panic::catch_unwind(|| store.trend(100_000, 0));
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn worker_flushes_events_and_stops_when_recorder_closes() {
+        let (_guard, store) = test_store("worker-flush");
+        let path = store.path.clone();
+        let worker = StoreWorker::start(store, 7);
+        worker
+            .recorder()
+            .try_record(event(1_753_488_000_000, "worker.example", &["192.0.2.1"]));
+
+        worker.shutdown();
+
+        let store = Store::open(&path).unwrap();
+        let page = store.queries(1, 10, None).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.records[0].domain, "worker.example");
+    }
+
+    #[test]
+    fn idle_worker_runs_periodic_cleanup() {
+        let (_guard, store) = test_store("worker-periodic-cleanup");
+        let path = store.path.clone();
+        store
+            .insert_events(&[event(0, "expired.example", &[])])
+            .unwrap();
+        let (recorder, receiver) = crate::dashboard::Recorder::channel(1);
+        let thread = std::thread::spawn(move || {
+            run_store_worker_with_interval(store, 1, receiver, Duration::from_millis(20));
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        drop(recorder);
+        thread.join().unwrap();
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.queries(1, 10, None).unwrap().total, 0);
     }
 }
