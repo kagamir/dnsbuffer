@@ -215,7 +215,7 @@ mod tests {
     use anyhow::{Result, anyhow};
     use async_trait::async_trait;
     use hickory_proto::op::{Message, MessageType, Query, ResponseCode};
-    use hickory_proto::rr::rdata::{A, AAAA, CNAME};
+    use hickory_proto::rr::rdata::A;
     use hickory_proto::rr::{Name, RData, Record, RecordType};
     use std::str::FromStr;
     use std::sync::Arc;
@@ -358,59 +358,32 @@ mod tests {
         assert!(events.try_recv().is_err());
     }
 
-    struct AnswerResolver;
-    #[async_trait]
-    impl Resolver for AnswerResolver {
-        async fn resolve(&self, query: &Message) -> Result<Message> {
-            let mut resp = Message::new(
-                query.metadata.id,
-                MessageType::Response,
-                query.metadata.op_code,
-            );
-            resp.metadata.response_code = ResponseCode::NoError;
-            let name = query.queries[0].name().clone();
-            resp.add_answer(Record::from_rdata(
-                name.clone(),
-                60,
-                RData::A(A::new(1, 2, 3, 4)),
-            ));
-            resp.add_answer(Record::from_rdata(
-                name.clone(),
-                60,
-                RData::A(A::new(1, 2, 3, 4)),
-            ));
-            resp.add_answer(Record::from_rdata(
-                name.clone(),
-                60,
-                RData::AAAA(AAAA("2001:0db8:0:0:0:0:0:1".parse().unwrap())),
-            ));
-            resp.add_answer(Record::from_rdata(
-                name.clone(),
-                60,
-                RData::CNAME(CNAME(Name::from_str("alias.example.").unwrap())),
-            ));
-            resp.add_authority(Record::from_rdata(name, 60, RData::A(A::new(9, 9, 9, 9))));
-            Ok(resp)
-        }
-    }
-
     #[tokio::test]
-    async fn records_upstream_and_cache_hit_once_and_refresh_records_nothing() {
-        let (pipeline, mut events) = recording_parts(Arc::new(AnswerResolver));
+    async fn background_refresh_records_no_extra_client_event() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (pipeline, mut events) =
+            recording_parts(Arc::new(CountingTtlZero(counter.clone())));
         let query = sample_query();
         pipeline.handle(&query).await;
         pipeline.handle(&query).await;
 
         let upstream = events.recv().await.unwrap();
         let cached = events.recv().await.unwrap();
-        assert_eq!(upstream.response_ips, ["1.2.3.4", "2001:db8::1"]);
+        assert_eq!(upstream.response_ips, ["1.2.3.4"]);
         assert!(!upstream.cache_hit);
         assert!(cached.cache_hit);
         assert_eq!(cached.response_ips, upstream.response_ips);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while counter.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background refresh must complete its upstream call");
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
         assert!(
             events.try_recv().is_err(),
-            "background work must not record another client query"
+            "refresh must not record a third event"
         );
     }
 

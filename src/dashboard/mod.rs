@@ -20,7 +20,6 @@ pub struct Recorder {
     sender: mpsc::Sender<QueryEvent>,
     full_logged: Arc<AtomicBool>,
     closed_logged: Arc<AtomicBool>,
-    worker: Option<Arc<super::dashboard::store::WorkerShutdown>>,
 }
 
 impl Recorder {
@@ -31,7 +30,6 @@ impl Recorder {
                 sender,
                 full_logged: Arc::new(AtomicBool::new(false)),
                 closed_logged: Arc::new(AtomicBool::new(false)),
-                worker: None,
             },
             receiver,
         )
@@ -61,11 +59,6 @@ impl Recorder {
                 }
             }
         }
-    }
-
-    pub(super) fn with_worker(mut self, worker: super::dashboard::store::WorkerShutdown) -> Self {
-        self.worker = Some(Arc::new(worker));
-        self
     }
 }
 

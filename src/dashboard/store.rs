@@ -23,52 +23,29 @@ static STORE_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub struct StoreWorker {
     recorder: Option<Recorder>,
-}
-
-pub(crate) struct WorkerShutdown {
-    thread: std::sync::Mutex<Option<JoinHandle<()>>>,
-    stopped: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-}
-
-impl Drop for WorkerShutdown {
-    fn drop(&mut self) {
-        let stopped = self.stopped.get_mut().expect("worker shutdown mutex poisoned");
-        if stopped.recv_timeout(SHUTDOWN_TIMEOUT).is_ok() {
-            if let Some(thread) = self
-                .thread
-                .get_mut()
-                .expect("worker thread mutex poisoned")
-                .take()
-                && thread.join().is_err()
-            {
-                tracing::warn!("query history store worker panicked during shutdown");
-            }
-        } else {
-            self.thread
-                .get_mut()
-                .expect("worker thread mutex poisoned")
-                .take();
-            tracing::warn!("query history store worker did not stop within {SHUTDOWN_TIMEOUT:?}");
-        }
-    }
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+    stopped: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 impl StoreWorker {
     pub fn start(store: Store, retention_days: u64) -> Self {
         let (recorder, receiver) = Recorder::channel(WORKER_CAPACITY);
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
         let (stopped_tx, stopped) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("dnsbuffer-store".into())
             .spawn(move || {
-                run_store_worker(store, retention_days, receiver);
+                run_store_worker(store, retention_days, receiver, shutdown_rx);
                 let _ = stopped_tx.send(());
             })
             .expect("failed to start query history store worker");
-        let recorder = recorder.with_worker(WorkerShutdown {
-            thread: std::sync::Mutex::new(Some(thread)),
-            stopped: std::sync::Mutex::new(stopped),
-        });
-        Self { recorder: Some(recorder) }
+        Self {
+            recorder: Some(recorder),
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+            stopped: Some(stopped),
+        }
     }
 
     pub fn recorder(&self) -> Recorder {
@@ -79,7 +56,9 @@ impl StoreWorker {
     }
 
     pub fn detach(mut self) -> Recorder {
-        self.recorder.take().expect("worker has not shut down")
+        let recorder = self.recorder.take().expect("worker has not shut down");
+        self.spawn_reaper();
+        recorder
     }
 
     pub fn shutdown(mut self) {
@@ -88,12 +67,54 @@ impl StoreWorker {
 
     fn stop(&mut self) {
         self.recorder.take();
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let stopped = self.stopped.take();
+        if stopped
+            .as_ref()
+            .is_some_and(|stopped| stopped.recv_timeout(SHUTDOWN_TIMEOUT).is_ok())
+        {
+            if self.thread.take().is_some_and(|thread| thread.join().is_err()) {
+                tracing::warn!("query history store worker panicked during shutdown");
+            }
+        } else if self.thread.take().is_some() {
+            tracing::warn!("query history store worker did not stop within {SHUTDOWN_TIMEOUT:?}");
+        }
+    }
+
+    fn spawn_reaper(&mut self) {
+        let shutdown = self.shutdown.take();
+        let Some(thread) = self.thread.take() else { return };
+        let Some(stopped) = self.stopped.take() else { return };
+        match std::thread::Builder::new()
+            .name("dnsbuffer-store-reaper".into())
+            .spawn(move || reap_store_worker(shutdown, stopped, thread))
+        {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!("failed to start query history store reaper: {error}");
+            }
+        }
+    }
+}
+
+fn reap_store_worker(
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    stopped: std::sync::mpsc::Receiver<()>,
+    thread: JoinHandle<()>,
+) {
+    let _shutdown = shutdown;
+    let _ = stopped.recv();
+    if thread.join().is_err() {
+        tracing::warn!("query history store worker panicked");
     }
 }
 
 impl Drop for StoreWorker {
     fn drop(&mut self) {
-        self.stop();
+        self.recorder.take();
+        self.spawn_reaper();
     }
 }
 
@@ -101,14 +122,16 @@ fn run_store_worker(
     store: Store,
     retention_days: u64,
     receiver: tokio::sync::mpsc::Receiver<QueryEvent>,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
 ) {
-    run_store_worker_with_interval(store, retention_days, receiver, CLEANUP_INTERVAL);
+    run_store_worker_with_interval(store, retention_days, receiver, shutdown, CLEANUP_INTERVAL);
 }
 
 fn run_store_worker_with_interval(
     store: Store,
     retention_days: u64,
     mut receiver: tokio::sync::mpsc::Receiver<QueryEvent>,
+    mut shutdown: tokio::sync::oneshot::Receiver<()>,
     cleanup_interval: Duration,
 ) {
     if let Err(error) = store.cleanup(retention_days, Utc::now().timestamp_millis()) {
@@ -125,10 +148,16 @@ fn run_store_worker_with_interval(
         }
     };
     let mut next_cleanup = Instant::now() + cleanup_interval;
+    let mut shutdown_received = false;
     loop {
         let events = runtime.block_on(async {
             let first = tokio::select! {
                 event = receiver.recv() => event,
+                _ = &mut shutdown, if !shutdown_received => {
+                    shutdown_received = true;
+                    receiver.close();
+                    receiver.recv().await
+                },
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_cleanup)) => None,
             };
             let Some(first) = first else {
@@ -219,7 +248,7 @@ impl Store {
         let _open_guard = STORE_OPEN_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("store open mutex poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let store = Self {
             path: path.to_owned(),
         };
@@ -563,11 +592,14 @@ fn query_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryRecord> {
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use rusqlite::Connection;
 
-    use super::{QueryEvent, Store, StoreWorker, run_store_worker_with_interval};
+    use super::{
+        QueryEvent, STORE_OPEN_LOCK, Store, StoreWorker, run_store_worker_with_interval,
+    };
 
     const HOUR_MS: i64 = 3_600_000;
     const DAY_MS: i64 = 86_400_000;
@@ -904,6 +936,112 @@ mod tests {
     }
 
     #[test]
+    fn explicit_shutdown_closes_clones_flushes_and_returns_promptly() {
+        let (_guard, store) = test_store("worker-explicit-shutdown");
+        let path = store.path.clone();
+        let worker = StoreWorker::start(store, 7);
+        let recorder = worker.recorder();
+        recorder.try_record(event(
+            1_753_488_000_000,
+            "shutdown.example",
+            &["192.0.2.2"],
+        ));
+
+        let started = Instant::now();
+        worker.shutdown();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "explicit shutdown must not wait for recorder clones"
+        );
+        recorder.try_record(event(
+            1_753_488_000_001,
+            "after-shutdown.example",
+            &[],
+        ));
+
+        let page = Store::open(&path).unwrap().queries(1, 10, None).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.records[0].domain, "shutdown.example");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_last_detached_recorder_never_blocks_tokio_worker() {
+        let (_guard, store) = test_store("worker-detached-drop");
+        let path = store.path.clone();
+        let recorder = StoreWorker::start(store, 7).detach();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        recorder.try_record(event(
+            1_753_488_000_000,
+            "detached.example",
+            &["192.0.2.3"],
+        ));
+
+        tokio::time::timeout(Duration::from_millis(50), async move {
+            drop(recorder);
+        })
+        .await
+        .expect("recorder drop must only close its sender");
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let total = Store::open(&path).unwrap().queries(1, 10, None).unwrap().total;
+                if total == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("detached recorder event must be flushed");
+    }
+
+    #[test]
+    fn concurrent_open_of_same_database_succeeds() {
+        let (guard, store) = test_store("concurrent-open");
+        drop(store);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let path = guard.path().to_owned();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    Store::open(&path)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn poisoned_open_lock_does_not_make_store_open_panic() {
+        let lock = STORE_OPEN_LOCK.get_or_init(|| Mutex::new(()));
+        if !lock.is_poisoned() {
+            let previous_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let _ = std::thread::spawn(move || {
+                let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                panic!("poison store open lock for regression test");
+            })
+            .join();
+            std::panic::set_hook(previous_hook);
+        }
+        let path = std::env::temp_dir().join(format!(
+            "dnsbuffer-poisoned-open-{}-{}.db",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let guard = TestDatabase(path);
+
+        let result = std::panic::catch_unwind(|| Store::open(guard.path()));
+        assert!(result.is_ok(), "poisoned synchronization must not panic");
+        result.unwrap().unwrap();
+    }
+
+    #[test]
     fn idle_worker_runs_periodic_cleanup() {
         let (_guard, store) = test_store("worker-periodic-cleanup");
         let path = store.path.clone();
@@ -911,12 +1049,20 @@ mod tests {
             .insert_events(&[event(0, "expired.example", &[])])
             .unwrap();
         let (recorder, receiver) = crate::dashboard::Recorder::channel(1);
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
         let thread = std::thread::spawn(move || {
-            run_store_worker_with_interval(store, 1, receiver, Duration::from_millis(20));
+            run_store_worker_with_interval(
+                store,
+                1,
+                receiver,
+                shutdown_rx,
+                Duration::from_millis(20),
+            );
         });
 
         std::thread::sleep(Duration::from_millis(100));
         drop(recorder);
+        drop(shutdown);
         thread.join().unwrap();
 
         let store = Store::open(&path).unwrap();
