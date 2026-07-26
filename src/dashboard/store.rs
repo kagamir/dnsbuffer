@@ -758,6 +758,18 @@ fn validate_schema_v1(conn: &mut Connection) -> Result<()> {
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut primary_key = columns
+            .iter()
+            .filter(|column| column.3 > 0)
+            .map(|column| (column.3, column.0.clone()))
+            .collect::<Vec<_>>();
+        primary_key.sort_by_key(|column| column.0);
+        let expected_primary_key = expected
+            .iter()
+            .filter(|column| column.3 > 0)
+            .map(|column| (column.3, column.0))
+            .collect::<Vec<_>>();
+        validate_primary_key_columns(table, &primary_key, &expected_primary_key)?;
         for (name, data_type, not_null, primary_key_ordinal) in expected {
             let Some(column) = columns.iter().find(|column| column.0 == *name) else {
                 bail!("database schema v1 table {table} is missing required column {name}");
@@ -832,6 +844,24 @@ fn validate_schema_v1(conn: &mut Connection) -> Result<()> {
         }
     }
     validate_schema_behavior(conn)?;
+    Ok(())
+}
+
+fn validate_primary_key_columns(
+    table: &str,
+    actual: &[(i32, String)],
+    expected: &[(i32, &str)],
+) -> Result<()> {
+    let matches = actual.len() == expected.len()
+        && actual.iter().zip(expected).all(
+            |((actual_ordinal, actual_name), (expected_ordinal, expected_name))| {
+                actual_ordinal == expected_ordinal
+                    && actual_name.eq_ignore_ascii_case(expected_name)
+            },
+        );
+    if !matches {
+        bail!("database schema v1 table {table} has an invalid primary key sequence");
+    }
     Ok(())
 }
 
@@ -912,7 +942,7 @@ mod tests {
 
     use super::{
         QueryEvent, STORE_OPEN_LOCK, Store, StoreWorker, WarningRateLimit,
-        run_store_worker_with_interval,
+        run_store_worker_with_interval, validate_primary_key_columns,
     };
 
     const HOUR_MS: i64 = 3_600_000;
@@ -1264,6 +1294,38 @@ mod tests {
         let guard = create_custom_v1("schema-reversed-ip-pk", &schema);
 
         assert!(Store::open(guard.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_schema_v1_response_ip_primary_key_with_extra_nullable_column() {
+        let mut schema = query_logs_table("PRIMARY KEY");
+        schema.push_str(&remaining_schema_tables().replace(
+            "ip TEXT NOT NULL,\n            PRIMARY KEY(query_id, ip)",
+            "ip TEXT NOT NULL,\n            discriminator TEXT,\n            PRIMARY KEY(query_id, ip, discriminator)",
+        ));
+        let guard = create_custom_v1("schema-extra-ip-pk", &schema);
+
+        assert!(Store::open(guard.path()).is_err());
+    }
+
+    #[test]
+    fn rejects_schema_v1_query_log_primary_key_with_extra_nullable_column() {
+        let mut schema = query_logs_table("");
+        schema = schema.replace(
+            "cache_hit INTEGER NOT NULL\n             );",
+            "cache_hit INTEGER NOT NULL,\n                discriminator TEXT,\n                PRIMARY KEY(id, discriminator)\n             );",
+        );
+        schema.push_str(remaining_schema_tables());
+        let guard = create_custom_v1("schema-extra-query-pk", &schema);
+
+        assert!(Store::open(guard.path()).is_err());
+    }
+
+    #[test]
+    fn exact_primary_key_sequence_rejects_extra_query_log_column() {
+        let actual = vec![(1, "id".to_owned()), (2, "discriminator".to_owned())];
+
+        assert!(validate_primary_key_columns("query_logs", &actual, &[(1, "id")]).is_err());
     }
 
     #[test]
