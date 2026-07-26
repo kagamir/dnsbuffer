@@ -26,11 +26,7 @@ impl HedgedResolver {
         }
     }
 
-    fn spawn_attempt(
-        &self,
-        attempts: &mut tokio::task::JoinSet<Result<Message>>,
-        query: &Message,
-    ) {
+    fn spawn_attempt(&self, attempts: &mut tokio::task::JoinSet<Result<Message>>, query: &Message) {
         let inner = self.inner.clone();
         let query = query.clone();
         attempts.spawn(async move { inner.resolve(&query).await });
@@ -293,11 +289,8 @@ mod tests {
             dropped: Arc::new(Notify::new()),
             first_succeeds: true,
         });
-        let hedged = HedgedResolver::new(
-            resolver,
-            Duration::from_millis(20),
-            Duration::from_secs(1),
-        );
+        let hedged =
+            HedgedResolver::new(resolver, Duration::from_millis(20), Duration::from_secs(1));
 
         hedged.resolve(&sample_query()).await.expect("hedge wins");
 
