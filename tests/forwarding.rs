@@ -230,19 +230,20 @@ async fn blocked_domain_returns_zero_address() {
     std::fs::create_dir_all(&dir).unwrap();
     let rules = dir.join("rules.txt");
     std::fs::write(&rules, "0.0.0.0 blocked.test\n").unwrap();
+    let rules_path = toml::Value::String(rules.to_string_lossy().into_owned()).to_string();
     let toml = format!(
         r#"
         [server]
         listen = "{listen}"
 
         [[adblock.rule_source]]
-        path = "{}"
+        path = {}
 
         [[upstream]]
         type = "plain"
         addr = "{}"
         "#,
-        rules.display(),
+        rules_path,
         upstream.0
     );
     let cfg: Config = toml::from_str(&toml).unwrap();
