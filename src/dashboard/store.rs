@@ -799,10 +799,18 @@ fn validate_schema_v1(conn: &Connection) -> Result<()> {
         );
     }
 
-    for (table, index) in [
-        ("query_logs", "query_logs_time_idx"),
-        ("query_logs", "query_logs_domain_idx"),
-        ("query_response_ips", "query_response_ips_ip_idx"),
+    for (table, index, expected_columns) in [
+        (
+            "query_logs",
+            "query_logs_time_idx",
+            &["timestamp_ms", "id"][..],
+        ),
+        ("query_logs", "query_logs_domain_idx", &["domain"][..]),
+        (
+            "query_response_ips",
+            "query_response_ips_ip_idx",
+            &["ip"][..],
+        ),
     ] {
         let mut indexes = conn.prepare(&format!("PRAGMA index_list({table})"))?;
         let exists = indexes
@@ -812,6 +820,16 @@ fn validate_schema_v1(conn: &Connection) -> Result<()> {
             .any(|name| name == index);
         if !exists {
             bail!("database schema v1 is missing required index {index}");
+        }
+        let mut index_info = conn.prepare(&format!("PRAGMA index_info({index})"))?;
+        let columns = index_info
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if columns != expected_columns {
+            bail!(
+                "database schema v1 index {index} must cover columns {}",
+                expected_columns.join(", ")
+            );
         }
     }
     Ok(())
@@ -1096,6 +1114,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_schema_v1_with_required_index_on_wrong_columns() {
+        let (guard, store) = test_store("schema-wrong-index-columns");
+        let conn = store.connect().unwrap();
+        conn.execute("DROP INDEX query_logs_domain_idx", [])
+            .unwrap();
+        conn.execute(
+            "CREATE INDEX query_logs_domain_idx ON query_logs(timestamp_ms)",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        drop(store);
+
+        let error = Store::open(guard.path()).unwrap_err();
+
+        assert!(error.to_string().contains("query_logs_domain_idx"));
+        assert!(error.to_string().contains("domain"));
+    }
+
+    #[test]
     fn cleanup_removes_expired_logs_and_ips_but_zero_keeps_all() {
         let (_guard, store) = test_store("cleanup");
         let now = 1_753_488_000_000;
@@ -1119,6 +1157,26 @@ mod tests {
             scalar(&store.connect().unwrap(), "SELECT COUNT(*) FROM query_logs"),
             1
         );
+    }
+
+    #[test]
+    fn cleanup_keeps_aggregate_buckets_that_overlap_a_non_aligned_cutoff() {
+        let (_guard, store) = test_store("cleanup-overlap");
+        let now = 100 * DAY_MS + 12 * HOUR_MS + 34_567;
+        let cutoff = now - DAY_MS;
+        store
+            .insert_events(&[
+                event(cutoff - 1, "before-cutoff.example", &[]),
+                event(cutoff, "at-cutoff.example", &[]),
+            ])
+            .unwrap();
+
+        store.cleanup(1, now).unwrap();
+        let conn = store.connect().unwrap();
+
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM query_logs"), 1);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM query_hourly_stats"), 1);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM query_daily_stats"), 1);
     }
 
     #[test]
@@ -1257,6 +1315,30 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("deadline"));
+    }
+
+    #[test]
+    fn sqlite_progress_handler_interrupts_work_after_the_deadline() {
+        let (_guard, store) = test_store("read-progress-deadline");
+        let conn = store
+            .read_connection(Some(Instant::now() + Duration::from_millis(5)))
+            .unwrap();
+
+        let error = conn
+            .query_row(
+                "WITH RECURSIVE values_(n) AS (
+                    VALUES(0) UNION ALL SELECT n + 1 FROM values_ WHERE n < 100000000
+                 ) SELECT SUM(n) FROM values_",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            rusqlite::Error::SqliteFailure(ref code, _)
+                if code.code == rusqlite::ErrorCode::OperationInterrupted
+        ));
     }
 
     #[test]
