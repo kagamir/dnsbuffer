@@ -78,10 +78,18 @@ fn default_log_level() -> String {
     "info".into()
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct CacheConfig {
     #[serde(default = "default_max_entries")]
     pub max_entries: usize,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_entries: default_max_entries(),
+        }
+    }
 }
 
 fn default_max_entries() -> usize {
@@ -502,6 +510,10 @@ mod tests {
         assert_eq!(cfg.dashboard.listen, "0.0.0.0:8080".parse().unwrap());
         assert_eq!(cfg.dashboard.database_path, PathBuf::from("dnsbuffer.db"));
         assert_eq!(cfg.dashboard.retention_days, 7);
+        assert_eq!(
+            cfg.cache.max_entries, 10_000,
+            "缺省 [cache] 段时也必须使用 10000 默认容量"
+        );
 
         let custom = "[dashboard]\nlisten = \"127.0.0.1:9090\"\ndatabase_path = \"data/stats.db\"\nretention_days = 0";
         let cfg: Config = toml::from_str(&base.replace("{dashboard}", custom)).unwrap();
