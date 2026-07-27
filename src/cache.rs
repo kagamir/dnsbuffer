@@ -1,6 +1,7 @@
 use hashlink::LinkedHashMap;
 use hickory_proto::op::Message;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// 缓存键：规范化域名（小写、无尾点）+ qtype 数值。
@@ -30,6 +31,8 @@ struct CacheEntry {
 pub struct Cache {
     map: Mutex<LinkedHashMap<CacheKey, CacheEntry>>,
     max_entries: usize,
+    lookups: AtomicU64,
+    hits: AtomicU64,
 }
 
 impl Cache {
@@ -38,14 +41,18 @@ impl Cache {
         Self {
             map: Mutex::new(LinkedHashMap::new()),
             max_entries: max_entries.max(1),
+            lookups: AtomicU64::new(0),
+            hits: AtomicU64::new(0),
         }
     }
 
     /// 命中时克隆报文并把 id 改写为当前查询 id，同时把条目刷新为最近使用（LRU）。
     /// bool 表示已过期（需后台刷新）。
     pub fn get(&self, key: &CacheKey, query_id: u16) -> Option<(Message, bool)> {
+        self.lookups.fetch_add(1, Ordering::Relaxed);
         let mut map = self.map.lock().ok()?;
         let entry = map.to_back(key)?; // LRU：命中即移到队尾
+        self.hits.fetch_add(1, Ordering::Relaxed);
         let mut msg = entry.message.clone();
         msg.metadata.id = query_id;
         let expired = Instant::now() >= entry.expires_at;
@@ -75,6 +82,14 @@ impl Cache {
 
     pub fn len(&self) -> usize {
         self.map.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// 自进程启动以来的累计 (查询次数, 命中次数)；过期的乐观命中也算命中。
+    pub fn hit_stats(&self) -> (u64, u64) {
+        (
+            self.lookups.load(Ordering::Relaxed),
+            self.hits.load(Ordering::Relaxed),
+        )
     }
 
     pub fn is_empty(&self) -> bool {
@@ -192,5 +207,17 @@ mod tests {
     fn missing_question_key_is_none() {
         let m = Message::new(5, MessageType::Query, OpCode::Query);
         assert!(CacheKey::from_query(&m).is_none());
+    }
+
+    #[test]
+    fn hit_stats_count_lookups_including_expired_optimistic_hits() {
+        let cache = Cache::new(10);
+        cache.get(&key("miss.com."), 1);
+        cache.put(key("hit.com."), response(1, "hit.com.", 300));
+        cache.get(&key("hit.com."), 2);
+        cache.put(key("stale.com."), response(1, "stale.com.", 0));
+        cache.get(&key("stale.com."), 3);
+
+        assert_eq!(cache.hit_stats(), (3, 2), "1 次未命中 + 2 次命中（含过期）");
     }
 }

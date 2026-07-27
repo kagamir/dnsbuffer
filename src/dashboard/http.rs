@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::sampler::CacheHitSampler;
 use super::store::{QueryPage, QueryRecord, Ranking, Store, TrendBucket, TrendResponse};
 use super::upstreams::UpstreamMetrics;
 
@@ -32,6 +33,8 @@ pub struct HttpState {
     pub upstreams: UpstreamMetrics,
     pub retention_days: u64,
     pub database_reads: Arc<tokio::sync::Semaphore>,
+    pub cache_sampler: Arc<CacheHitSampler>,
+    pub cache_max_entries: usize,
 }
 
 pub fn router(state: HttpState) -> Router {
@@ -47,6 +50,7 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/dashboard/queries", get(queries))
         .route("/api/dashboard/rankings", get(rankings))
         .route("/api/dashboard/upstreams", get(upstreams))
+        .route("/api/dashboard/cache-curve", get(cache_curve))
         .with_state(state)
 }
 
@@ -167,6 +171,15 @@ async fn upstreams(
     State(state): State<HttpState>,
 ) -> Json<Vec<super::upstreams::UpstreamSnapshot>> {
     Json(state.upstreams.snapshot())
+}
+
+async fn cache_curve(State(state): State<HttpState>) -> Json<CacheCurveDto> {
+    Json(CacheCurveDto {
+        max_entries: state.cache_max_entries as u64,
+        current_entries: state.cache_sampler.cache_len() as u64,
+        current: state.cache_sampler.latest(),
+        points: state.cache_sampler.points(),
+    })
 }
 
 async fn database_call<T, F>(
@@ -353,6 +366,16 @@ impl TryFrom<QueryRecord> for QueryRecordDto {
             response_ips: value.response_ips,
         })
     }
+}
+
+#[derive(Serialize)]
+struct CacheCurveDto {
+    max_entries: u64,
+    current_entries: u64,
+    /// 最近一次观测点；尚无观测时为 null。
+    current: Option<super::sampler::CacheSample>,
+    /// 按缓存容量升序的观测点，直接连线即为命中率-缓存大小曲线。
+    points: Vec<super::sampler::CacheSample>,
 }
 
 #[derive(Serialize)]

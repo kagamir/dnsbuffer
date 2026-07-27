@@ -29,13 +29,17 @@ impl UpstreamGroup {
         members: Vec<(String, Arc<dyn Resolver>)>,
         window: usize,
         k: f64,
+        retention_days: u64,
         metrics: &mut UpstreamMetricsBuilder,
         group_kind: &'static str,
     ) -> Self {
         let members = members
             .into_iter()
             .map(|(name, resolver)| {
-                let stats = Arc::new(Mutex::new(UpstreamStats::new(window)));
+                let stats = Arc::new(Mutex::new(UpstreamStats::with_retention(
+                    window,
+                    retention_days,
+                )));
                 metrics.register(name.clone(), group_kind, stats.clone());
                 Member {
                     name,
@@ -214,6 +218,7 @@ mod tests {
             )],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         );
@@ -224,6 +229,7 @@ mod tests {
             )],
             8,
             5.0,
+            0,
             &mut metrics,
             "fallback",
         );
@@ -262,6 +268,7 @@ mod tests {
             )],
             64,
             5.0,
+            0,
             &mut metrics,
             "primary",
         );
@@ -286,6 +293,7 @@ mod tests {
             )],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         );
@@ -314,6 +322,7 @@ mod tests {
             ],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         );
@@ -343,6 +352,7 @@ mod tests {
             ],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         );
@@ -366,6 +376,7 @@ mod tests {
             vec![("bad".into(), bad as Arc<dyn Resolver>)],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         );
@@ -381,6 +392,7 @@ mod tests {
             vec![("bad".into(), bad as Arc<dyn Resolver>)],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         ));
@@ -388,6 +400,7 @@ mod tests {
             vec![("ok".into(), ok as Arc<dyn Resolver>)],
             8,
             5.0,
+            0,
             &mut metrics,
             "fallback",
         ));
@@ -417,6 +430,7 @@ mod tests {
             vec![("hang".into(), Arc::new(Hang) as Arc<dyn Resolver>)],
             8,
             5.0,
+            0,
             &mut metrics,
             "primary",
         ));
@@ -424,6 +438,7 @@ mod tests {
             vec![("ok".into(), ok as Arc<dyn Resolver>)],
             8,
             5.0,
+            0,
             &mut metrics,
             "fallback",
         ));

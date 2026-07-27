@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+const HOUR_MS: i64 = 3_600_000;
+const DAY_MS: i64 = 86_400_000;
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StatsSnapshot {
     pub samples: usize,
@@ -9,10 +12,15 @@ pub struct StatsSnapshot {
     pub avg_latency_ms: Option<f64>,
 }
 
-/// 单个上游的滑动窗口统计：近 N 次调用的失败率与平均延迟，驱动加权随机选择。
+/// 单个上游的调用统计。
+/// 滑动窗口（近 N 次）驱动加权随机选择；
+/// 按小时分桶的长期历史（保留 retention_days）驱动面板快照。
 pub struct UpstreamStats {
     window: usize,
     samples: VecDeque<Sample>,
+    /// None 表示永久保留（retention_days = 0）。
+    retention_ms: Option<i64>,
+    history: VecDeque<HourBucket>,
 }
 
 #[derive(Clone, Copy)]
@@ -21,11 +29,29 @@ enum Sample {
     Failure,
 }
 
+#[derive(Clone, Copy)]
+struct HourBucket {
+    hour_ms: i64,
+    samples: usize,
+    successes: usize,
+    latency_sum_ms: f64,
+}
+
 impl UpstreamStats {
     pub fn new(window: usize) -> Self {
+        Self::with_retention(window, 0)
+    }
+
+    /// `retention_days = 0` 表示历史永久保留。
+    pub fn with_retention(window: usize, retention_days: u64) -> Self {
         Self {
             window: window.max(1),
             samples: VecDeque::new(),
+            retention_ms: i64::try_from(retention_days)
+                .ok()
+                .filter(|days| *days > 0)
+                .and_then(|days| days.checked_mul(DAY_MS)),
+            history: VecDeque::new(),
         }
     }
 
@@ -36,14 +62,57 @@ impl UpstreamStats {
         self.samples.push_back(s);
     }
 
+    fn record_history(&mut self, now_ms: i64, success_latency_ms: Option<f64>) {
+        let hour_ms = now_ms.div_euclid(HOUR_MS).saturating_mul(HOUR_MS);
+        // 时钟回拨时并入最新桶，保证桶序单调
+        match self.history.back_mut() {
+            Some(bucket) if bucket.hour_ms >= hour_ms => {
+                bucket.samples += 1;
+                if let Some(latency_ms) = success_latency_ms {
+                    bucket.successes += 1;
+                    bucket.latency_sum_ms += latency_ms;
+                }
+            }
+            _ => self.history.push_back(HourBucket {
+                hour_ms,
+                samples: 1,
+                successes: usize::from(success_latency_ms.is_some()),
+                latency_sum_ms: success_latency_ms.unwrap_or(0.0),
+            }),
+        }
+        if let Some(cutoff) = self.retention_cutoff(now_ms) {
+            while self
+                .history
+                .front()
+                .is_some_and(|bucket| bucket.hour_ms.saturating_add(HOUR_MS) <= cutoff)
+            {
+                self.history.pop_front();
+            }
+        }
+    }
+
+    fn retention_cutoff(&self, now_ms: i64) -> Option<i64> {
+        self.retention_ms
+            .map(|retention_ms| now_ms.saturating_sub(retention_ms))
+    }
+
     pub fn record_success(&mut self, latency: Duration) {
-        self.push(Sample::Success {
-            latency_ms: latency.as_secs_f64() * 1000.0,
-        });
+        self.record_success_at(latency, unix_millis());
+    }
+
+    pub fn record_success_at(&mut self, latency: Duration, now_ms: i64) {
+        let latency_ms = latency.as_secs_f64() * 1000.0;
+        self.push(Sample::Success { latency_ms });
+        self.record_history(now_ms, Some(latency_ms));
     }
 
     pub fn record_failure(&mut self) {
+        self.record_failure_at(unix_millis());
+    }
+
+    pub fn record_failure_at(&mut self, now_ms: i64) {
         self.push(Sample::Failure);
+        self.record_history(now_ms, None);
     }
 
     pub fn failure_rate(&self) -> f64 {
@@ -73,18 +142,37 @@ impl UpstreamStats {
         }
     }
 
+    /// 面板快照：基于 retention_days 内的长期历史，而非选择器滑动窗口。
     pub fn snapshot(&self) -> StatsSnapshot {
-        let (latency_sum, successes) =
-            self.samples
-                .iter()
-                .fold((0.0, 0usize), |(sum, count), sample| match sample {
-                    Sample::Success { latency_ms } => (sum + latency_ms, count + 1),
-                    Sample::Failure => (sum, count),
-                });
+        self.snapshot_at(unix_millis())
+    }
+
+    pub fn snapshot_at(&self, now_ms: i64) -> StatsSnapshot {
+        let cutoff = self.retention_cutoff(now_ms);
+        let (samples, successes, latency_sum) = self
+            .history
+            .iter()
+            .filter(|bucket| {
+                cutoff.is_none_or(|cutoff| bucket.hour_ms.saturating_add(HOUR_MS) > cutoff)
+            })
+            .fold(
+                (0usize, 0usize, 0.0),
+                |(samples, successes, latency_sum), bucket| {
+                    (
+                        samples + bucket.samples,
+                        successes + bucket.successes,
+                        latency_sum + bucket.latency_sum_ms,
+                    )
+                },
+            );
         StatsSnapshot {
-            samples: self.samples.len(),
+            samples,
             successes,
-            failure_rate: self.failure_rate(),
+            failure_rate: if samples == 0 {
+                0.0
+            } else {
+                (samples - successes) as f64 / samples as f64
+            },
             avg_latency_ms: (successes > 0).then(|| latency_sum / successes as f64),
         }
     }
@@ -94,6 +182,14 @@ impl UpstreamStats {
         let k = k.max(0.0);
         1.0 / ((self.avg_latency_ms() + 1.0) * (1.0 + k * self.failure_rate()))
     }
+}
+
+fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 #[cfg(test)]
@@ -164,6 +260,50 @@ mod tests {
             s.record_success(Duration::from_millis(10));
         }
         assert_eq!(s.failure_rate(), 0.0, "old failures evicted from window");
+    }
+
+    #[test]
+    fn snapshot_counts_beyond_selector_window() {
+        let mut s = UpstreamStats::new(4);
+        for _ in 0..10 {
+            s.record_success(Duration::from_millis(10));
+        }
+        // 选择器窗口只留 4 条，但面板样本数覆盖全部历史
+        assert_eq!(s.snapshot().samples, 10);
+        assert_eq!(s.snapshot().successes, 10);
+    }
+
+    #[test]
+    fn snapshot_prunes_history_outside_retention() {
+        const DAY_MS: i64 = 86_400_000;
+        let mut s = UpstreamStats::with_retention(4, 7);
+        let now = 100 * DAY_MS;
+        s.record_failure_at(now - 8 * DAY_MS);
+        s.record_success_at(Duration::from_millis(30), now - DAY_MS);
+        s.record_success_at(Duration::from_millis(10), now);
+
+        let snap = s.snapshot_at(now);
+        assert_eq!(snap.samples, 2, "8 天前的样本应被剔除");
+        assert_eq!(snap.successes, 2);
+        assert_eq!(snap.failure_rate, 0.0);
+        assert_eq!(snap.avg_latency_ms, Some(20.0));
+
+        let later = s.snapshot_at(now + 8 * DAY_MS);
+        assert_eq!(later.samples, 0, "超过保留期后样本归零");
+        assert_eq!(later.failure_rate, 0.0);
+        assert_eq!(later.avg_latency_ms, None);
+    }
+
+    #[test]
+    fn zero_retention_keeps_full_history() {
+        const DAY_MS: i64 = 86_400_000;
+        let mut s = UpstreamStats::with_retention(2, 0);
+        s.record_failure_at(0);
+        s.record_success_at(Duration::from_millis(10), 400 * DAY_MS);
+        let snap = s.snapshot_at(400 * DAY_MS);
+        assert_eq!(snap.samples, 2);
+        assert_eq!(snap.successes, 1);
+        assert_eq!(snap.failure_rate, 0.5);
     }
 
     #[test]

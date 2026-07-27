@@ -6,6 +6,7 @@ use dnsbuffer::build_pipeline;
 use dnsbuffer::config::Config;
 use dnsbuffer::dashboard::build_runtime;
 use dnsbuffer::dashboard::http::{HttpState, router};
+use dnsbuffer::dashboard::sampler::CacheHitSampler;
 use dnsbuffer::dashboard::store::{Store, StoreWorker};
 use dnsbuffer::dashboard::upstreams::UpstreamMetrics;
 use dnsbuffer::dashboard::{QueryEvent, Recorder};
@@ -494,11 +495,27 @@ fn test_router(store: Store) -> axum::Router {
 }
 
 fn test_router_with_metrics(store: Store, upstreams: UpstreamMetrics) -> axum::Router {
+    test_router_with_sampler(
+        store,
+        upstreams,
+        Arc::new(CacheHitSampler::new(Arc::new(
+            dnsbuffer::cache::Cache::new(10_000),
+        ))),
+    )
+}
+
+fn test_router_with_sampler(
+    store: Store,
+    upstreams: UpstreamMetrics,
+    cache_sampler: Arc<CacheHitSampler>,
+) -> axum::Router {
     router(HttpState {
         store: Arc::new(store),
         upstreams,
         retention_days: 7,
         database_reads: Arc::new(tokio::sync::Semaphore::new(4)),
+        cache_sampler,
+        cache_max_entries: 10_000,
     })
 }
 
@@ -703,6 +720,68 @@ async fn database_failures_return_sanitized_consistent_errors() {
 }
 
 #[tokio::test]
+async fn cache_curve_endpoint_reports_observed_size_and_hit_rate_points() {
+    let (_guard, store) = test_store("cache-curve-endpoint").await;
+    let cache = Arc::new(dnsbuffer::cache::Cache::new(10_000));
+    let sampler = Arc::new(CacheHitSampler::new(cache.clone()));
+    let key = |name: &str| dnsbuffer::cache::CacheKey {
+        name: name.into(),
+        qtype: 1,
+    };
+    let cached_response = |name: &str| {
+        let mut message = hickory_proto::op::Message::new(
+            1,
+            hickory_proto::op::MessageType::Response,
+            hickory_proto::op::OpCode::Query,
+        );
+        message.metadata.response_code = hickory_proto::op::ResponseCode::NoError;
+        let parsed: hickory_proto::rr::Name = format!("{name}.").parse().unwrap();
+        let mut question = hickory_proto::op::Query::new();
+        question.set_name(parsed.clone());
+        question.set_query_type(hickory_proto::rr::RecordType::A);
+        message.add_query(question);
+        message.add_answer(hickory_proto::rr::Record::from_rdata(
+            parsed,
+            300,
+            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A::new(192, 0, 2, 1)),
+        ));
+        message
+    };
+    // 观测 1：1 条缓存，累计 2 次查询 1 次命中
+    cache.get(&key("hot.example"), 1);
+    cache.put(key("hot.example"), cached_response("hot.example"));
+    cache.get(&key("hot.example"), 2);
+    sampler.observe();
+    // 观测 2：2 条缓存，累计 3 次查询 2 次命中
+    cache.put(key("second.example"), cached_response("second.example"));
+    cache.get(&key("second.example"), 3);
+    sampler.observe();
+
+    let app = test_router_with_sampler(store, UpstreamMetrics::default(), sampler);
+    let response = request(app, "/api/dashboard/cache-curve").await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert_eq!(body["max_entries"], 10_000);
+    assert_eq!(body["current_entries"], 2);
+    assert_eq!(body["current"]["size"], 2);
+    let expected = 2.0 / 3.0;
+    assert!((body["current"]["hit_rate"].as_f64().unwrap() - expected).abs() < 1e-9);
+    let points = body["points"].as_array().unwrap();
+    assert_eq!(points.len(), 3, "含初始 (0, 0) 观测点");
+    assert_eq!(
+        (points[0]["size"].as_u64(), points[0]["hit_rate"].as_f64()),
+        (Some(0), Some(0.0))
+    );
+    assert_eq!(
+        (points[1]["size"].as_u64(), points[1]["hit_rate"].as_f64()),
+        (Some(1), Some(0.5))
+    );
+    assert_eq!(points[2]["size"], 2);
+    assert!((points[2]["hit_rate"].as_f64().unwrap() - expected).abs() < 1e-9);
+}
+
+#[tokio::test]
 async fn locked_database_returns_timeout_within_client_deadline_and_recovers() {
     let (_guard, store) = test_store("db-lock-timeout").await;
     let lock = store.connect().unwrap();
@@ -714,6 +793,10 @@ async fn locked_database_returns_timeout_within_client_deadline_and_recovers() {
         upstreams: UpstreamMetrics::default(),
         retention_days: 7,
         database_reads: permits.clone(),
+        cache_sampler: Arc::new(CacheHitSampler::new(Arc::new(
+            dnsbuffer::cache::Cache::new(1),
+        ))),
+        cache_max_entries: 10_000,
     });
     let started = std::time::Instant::now();
 
@@ -754,6 +837,8 @@ async fn serves_embedded_assets_and_method_errors() {
     let index = text(index).await;
     for marker in [
         "id=\"trend\"",
+        "id=\"cache\"",
+        "id=\"cache-chart\"",
         "id=\"rankings\"",
         "id=\"upstreams\"",
         "id=\"queries\"",
@@ -784,7 +869,7 @@ async fn serves_embedded_assets_and_method_errors() {
     assert!(
         text(chart)
             .await
-            .starts_with("/* dnsbuffer chart module v1.0.0 */")
+            .starts_with("/* dnsbuffer chart module v1.1.0 */")
     );
 
     let post = app

@@ -28,6 +28,7 @@ use crate::upstream::group::{FallbackResolver, UpstreamGroup};
 pub struct BuiltPipeline {
     pub pipeline: Arc<Pipeline>,
     pub upstream_metrics: UpstreamMetrics,
+    pub cache_sampler: Arc<crate::dashboard::sampler::CacheHitSampler>,
 }
 
 /// 依据配置构建解析链，并使用调用方拥有的 recorder 记录查询。
@@ -88,10 +89,14 @@ pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<Built
     };
     let metrics = metrics.build();
 
+    let cache_sampler = Arc::new(crate::dashboard::sampler::CacheHitSampler::new(
+        cache.clone(),
+    ));
     let pipeline = Arc::new(Pipeline::new(crate::pipeline::PipelineParts {
         hosts,
         filter,
         cache,
+        cache_sampler: cache_sampler.clone(),
         upstream: resolver,
         ecs,
         query_timeout: std::time::Duration::from_millis(config.server.query_timeout_ms),
@@ -100,6 +105,7 @@ pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<Built
     Ok(BuiltPipeline {
         pipeline,
         upstream_metrics: metrics,
+        cache_sampler,
     })
 }
 
@@ -121,6 +127,7 @@ async fn build_group(
         members,
         config.selector.window,
         config.selector.k,
+        u64::from(config.dashboard.retention_days),
         metrics,
         group_kind,
     )))

@@ -6,6 +6,7 @@ use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RData;
 
 use crate::cache::{Cache, CacheKey};
+use crate::dashboard::sampler::CacheHitSampler;
 use crate::dashboard::{QueryEvent, Recorder};
 use crate::ecs::EcsSubnet;
 use crate::filter::Filter;
@@ -16,6 +17,7 @@ pub struct PipelineParts {
     pub hosts: HostsMap,
     pub filter: Arc<Filter>,
     pub cache: Arc<Cache>,
+    pub cache_sampler: Arc<CacheHitSampler>,
     pub upstream: Arc<dyn Resolver>,
     pub ecs: Option<EcsSubnet>,
     pub query_timeout: Duration,
@@ -27,6 +29,7 @@ pub struct Pipeline {
     hosts: HostsMap,
     filter: Arc<Filter>,
     cache: Arc<Cache>,
+    cache_sampler: Arc<CacheHitSampler>,
     upstream: Arc<dyn Resolver>,
     ecs: Option<EcsSubnet>,
     query_timeout: Duration,
@@ -39,6 +42,7 @@ impl Pipeline {
             hosts: parts.hosts,
             filter: parts.filter,
             cache: parts.cache,
+            cache_sampler: parts.cache_sampler,
             upstream: parts.upstream,
             ecs: parts.ecs,
             query_timeout: parts.query_timeout,
@@ -83,7 +87,7 @@ impl Pipeline {
         } else {
             // 3. 乐观缓存
             let key = CacheKey::from_query(query);
-            if let Some((key, cached, expired)) = key.as_ref().and_then(|key| {
+            let outcome = if let Some((key, cached, expired)) = key.as_ref().and_then(|key| {
                 self.cache
                     .get(key, query.metadata.id)
                     .map(|(cached, expired)| (key, cached, expired))
@@ -91,7 +95,9 @@ impl Pipeline {
                 if expired {
                     self.spawn_refresh(key.clone(), query.clone());
                 }
-                (cached, false, true)
+                // 缓存的屏蔽型应答（过滤上游返回的 0.0.0.0/::）也计入屏蔽
+                let blocked = is_blocked_response(&cached);
+                (cached, blocked, true)
             } else {
                 // 4. 上游
                 let response = match self.resolve_upstream(query).await {
@@ -108,8 +114,12 @@ impl Pipeline {
                         servfail(query)
                     }
                 };
-                (response, false, false)
-            }
+                let blocked = is_blocked_response(&response);
+                (response, blocked, false)
+            };
+            // 每个经过缓存的请求处理完（含可能的写入）后描一个观测点
+            self.cache_sampler.observe();
+            outcome
         };
         self.record_query(query, &response, started, started_at_ms, blocked, cache_hit);
         response
@@ -177,6 +187,35 @@ impl Pipeline {
             }
         });
     }
+}
+
+/// 按响应内容识别屏蔽型应答：NoError、存在 A/AAAA 记录、且地址记录全部
+/// 指向未指定地址（0.0.0.0 / ::）。本地过滤器与过滤型上游（NextDNS、
+/// AdGuard DNS 等）都用这种形态表示屏蔽，因此上游返回或缓存命中的
+/// 屏蔽应答也能被统计为屏蔽。
+fn is_blocked_response(message: &Message) -> bool {
+    if message.metadata.response_code != ResponseCode::NoError {
+        return false;
+    }
+    let mut addresses = 0usize;
+    for record in &message.answers {
+        match &record.data {
+            RData::A(value) => {
+                if !value.0.is_unspecified() {
+                    return false;
+                }
+                addresses += 1;
+            }
+            RData::AAAA(value) => {
+                if !value.0.is_unspecified() {
+                    return false;
+                }
+                addresses += 1;
+            }
+            _ => {}
+        }
+    }
+    addresses > 0
 }
 
 fn response_code_name(code: ResponseCode) -> String {
@@ -289,11 +328,95 @@ mod tests {
         m
     }
 
+    /// 过滤型上游（如 NextDNS）：以 0.0.0.0 应答表示屏蔽。
+    struct FilteringUpstream;
+    #[async_trait]
+    impl Resolver for FilteringUpstream {
+        async fn resolve(&self, query: &Message) -> Result<Message> {
+            let mut resp = Message::new(
+                query.metadata.id,
+                MessageType::Response,
+                query.metadata.op_code,
+            );
+            resp.metadata.response_code = ResponseCode::NoError;
+            if let Some(q) = query.queries.first() {
+                resp.add_query(q.clone());
+                resp.add_answer(Record::from_rdata(
+                    q.name().clone(),
+                    300,
+                    RData::A(A(std::net::Ipv4Addr::UNSPECIFIED)),
+                ));
+            }
+            Ok(resp)
+        }
+    }
+
+    #[test]
+    fn blocked_response_detection_covers_zero_addresses_only() {
+        let build = |records: Vec<RData>, code: ResponseCode| {
+            let mut resp = Message::new(1, MessageType::Response, hickory_proto::op::OpCode::Query);
+            resp.metadata.response_code = code;
+            for data in records {
+                resp.add_answer(Record::from_rdata(
+                    Name::from_str("example.com.").unwrap(),
+                    300,
+                    data,
+                ));
+            }
+            resp
+        };
+        let zero4 = RData::A(A(std::net::Ipv4Addr::UNSPECIFIED));
+        let zero6 = RData::AAAA(AAAA(std::net::Ipv6Addr::UNSPECIFIED));
+        let real = RData::A(A::new(1, 2, 3, 4));
+
+        assert!(is_blocked_response(&build(
+            vec![zero4.clone()],
+            ResponseCode::NoError
+        )));
+        assert!(is_blocked_response(&build(
+            vec![zero4.clone(), zero6.clone()],
+            ResponseCode::NoError
+        )));
+        assert!(
+            !is_blocked_response(&build(vec![real.clone()], ResponseCode::NoError)),
+            "真实地址不是屏蔽"
+        );
+        assert!(
+            !is_blocked_response(&build(vec![zero4.clone(), real], ResponseCode::NoError)),
+            "混有真实地址不算屏蔽"
+        );
+        assert!(
+            !is_blocked_response(&build(vec![], ResponseCode::NoError)),
+            "无地址记录不算屏蔽"
+        );
+        assert!(!is_blocked_response(&build(
+            vec![zero4],
+            ResponseCode::NXDomain
+        )));
+    }
+
+    #[tokio::test]
+    async fn upstream_filtered_answers_count_as_blocked_also_when_cached() {
+        let (pipeline, mut events) = recording_parts(Arc::new(FilteringUpstream));
+
+        pipeline.handle(&sample_query()).await;
+        let first = events.recv().await.unwrap();
+        assert!(first.blocked, "上游返回 0.0.0.0 计为屏蔽");
+        assert!(!first.cache_hit);
+
+        pipeline.handle(&sample_query()).await;
+        let second = events.recv().await.unwrap();
+        assert!(second.blocked, "缓存命中的屏蔽应答同样计为屏蔽");
+        assert!(second.cache_hit);
+    }
+
     fn default_parts(upstream: Arc<dyn Resolver>) -> PipelineParts {
+        let cache = Arc::new(crate::cache::Cache::new(16));
         PipelineParts {
             hosts: crate::hosts::HostsMap::from_entries(&[]),
             filter: Arc::new(crate::filter::Filter::new(&[])),
-            cache: Arc::new(crate::cache::Cache::new(16)),
+            cache: cache.clone(),
+            cache_sampler: Arc::new(CacheHitSampler::new(cache)),
             upstream,
             ecs: None,
             query_timeout: Duration::from_secs(5),
@@ -489,15 +612,7 @@ mod tests {
         // 返回旧值，同时后台刷新应再次调用上游（计数最终为 2）
         let counter = Arc::new(AtomicUsize::new(0));
         let resolver = Arc::new(CountingTtlZero(counter.clone()));
-        let pipeline = Pipeline::new(PipelineParts {
-            hosts: crate::hosts::HostsMap::from_entries(&[]),
-            filter: Arc::new(crate::filter::Filter::new(&[])),
-            cache: Arc::new(crate::cache::Cache::new(16)),
-            upstream: resolver,
-            ecs: None,
-            query_timeout: Duration::from_secs(5),
-            recorder: Recorder::disabled(),
-        });
+        let pipeline = Pipeline::new(default_parts(resolver));
         let q = sample_query();
         let _ = pipeline.handle(&q).await; // 首查 → 上游 1 次 + 入缓存(TTL0)
         let resp = pipeline.handle(&q).await; // 过期命中 → 立即返回 + 后台刷新

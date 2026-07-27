@@ -89,10 +89,11 @@
     const state = {
       page: 1, pageSize: 50, search: "", controllers: new Map(),
       queryLoading: false, totalPages: null, requestedPage: 1, trendData: null,
-      queryRequestId: 0
+      cacheData: null, queryRequestId: 0
     };
-    const roundTracker = createRoundTracker(["trend", "upstreams", "rankings", "queries"]);
-    const regions = Object.fromEntries(["trend", "upstreams", "rankings", "queries"].map((name) => [name, document.querySelector(`#${name}`)]));
+    const regionNames = ["trend", "cache", "upstreams", "rankings", "queries"];
+    const roundTracker = createRoundTracker(regionNames);
+    const regions = Object.fromEntries(regionNames.map((name) => [name, document.querySelector(`#${name}`)]));
     const previousButton = document.querySelector("#previous-page");
     const nextButton = document.querySelector("#next-page");
 
@@ -177,6 +178,22 @@
       }), { total: 0, blocked: 0, cache: 0 });
       document.querySelector("#trend-summary").textContent = `${aggregation}，共 ${window.DnsTrendChart.formatCount(totals.total)} 次查询，${window.DnsTrendChart.formatCount(totals.blocked)} 次屏蔽，${window.DnsTrendChart.formatCount(totals.cache)} 次缓存命中`;
     }
+    function renderCache(data) {
+      const points = Array.isArray(data.points) ? data.points : [];
+      state.cacheData = data;
+      window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), data);
+      const format = window.DnsTrendChart.formatCount;
+      if (!points.length || !data.current) {
+        document.querySelector("#cache-note").textContent = "正在收集观测数据（每个请求记录一次）";
+        document.querySelector("#cache-summary").textContent = "缓存命中率曲线暂无观测数据";
+        return;
+      }
+      const percent = `${(Math.min(1, Math.max(0, Number(data.current.hit_rate) || 0)) * 100).toFixed(1)}%`;
+      document.querySelector("#cache-note").textContent =
+        `观测点 ${points.length} · 当前 ${format(data.current_entries)} / ${format(data.max_entries)} 条 · 累计命中率 ${percent}`;
+      document.querySelector("#cache-summary").textContent =
+        `已按缓存条数记录 ${points.length} 个命中率观测点，当前缓存 ${format(data.current_entries)} 条（配置上限 ${format(data.max_entries)}），累计命中率 ${percent}`;
+    }
     function renderUpstreams(data) {
       const target = document.querySelector("#upstream-list");
       if (!Array.isArray(data) || data.length === 0) return replaceChildren(target, [element("p", "暂无上游数据", "empty")]);
@@ -245,6 +262,7 @@
       beginRefreshStatus();
       const requests = [
         ["trend", loadRegion("trend", "/api/dashboard/trend", renderTrend)],
+        ["cache", loadRegion("cache", "/api/dashboard/cache-curve", renderCache)],
         ["upstreams", loadRegion("upstreams", "/api/dashboard/upstreams", renderUpstreams)],
         ["rankings", loadRegion("rankings", "/api/dashboard/rankings", renderRankings)],
         ["queries", loadQueries(false, roundId)]
@@ -264,7 +282,10 @@
     previousButton.addEventListener("click", () => { if (!state.queryLoading && state.page > 1) { state.page -= 1; loadQueries(false); } });
     nextButton.addEventListener("click", () => { if (!state.queryLoading && (state.totalPages == null || state.page < state.totalPages)) { state.page += 1; loadQueries(false); } });
     let resizeTimer;
-    window.addEventListener("resize", () => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => { if (state.trendData) window.DnsTrendChart.render(document.querySelector("#trend-chart"), state.trendData.buckets, state.trendData.granularity); }, 120); });
+    window.addEventListener("resize", () => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => {
+      if (state.trendData) window.DnsTrendChart.render(document.querySelector("#trend-chart"), state.trendData.buckets, state.trendData.granularity);
+      if (state.cacheData) window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), state.cacheData);
+    }, 120); });
     updatePagination(); refreshAll(); window.setInterval(refreshAll, 5000);
   }
 

@@ -133,3 +133,37 @@ test("hour and day buckets have distinct local date-aware labels", () => {
 test("three chart series expose non-color line patterns", () => {
   assert.deepEqual(chart.series.map((item) => item.dash), [[], [7, 5], [2, 4]]);
 });
+
+test("hover maps pointer position to the nearest bucket and ignores outside hits", () => {
+  assert.equal(chart.hoverIndex(40, 40, 300, 4), 0);
+  assert.equal(chart.hoverIndex(340, 40, 300, 4), 3);
+  assert.equal(chart.hoverIndex(160, 40, 300, 4), 1);
+  assert.equal(chart.hoverIndex(200, 40, 300, 1), 0, "单桶时绘图区内任意位置命中它");
+  assert.equal(chart.hoverIndex(20, 40, 300, 4), null, "绘图区左侧超出容差不命中");
+  assert.equal(chart.hoverIndex(360, 40, 300, 4), null, "绘图区右侧超出容差不命中");
+  assert.equal(chart.hoverIndex(NaN, 40, 300, 4), null);
+  assert.equal(chart.hoverIndex(100, 40, 300, 0), null);
+});
+
+test("hover tooltip lists the three series values in legend order and colors", () => {
+  const rows = chart.tooltipRows({ total_queries: 120, blocked_queries: 8, cache_hits: "44" });
+  assert.deepEqual(rows.map((row) => [row.label, row.value]), [
+    ["全部查询", 120],
+    ["已屏蔽", 8],
+    ["缓存命中", 44]
+  ]);
+  assert.deepEqual(rows.map((row) => row.color), chart.series.map((item) => item.color));
+  assert.deepEqual(chart.tooltipRows(undefined).map((row) => row.value), [0, 0, 0]);
+});
+
+test("cache curve axis follows observations and only stretches to a nearby configured capacity", () => {
+  const points = [
+    { size: 120, hit_rate: 0.4 },
+    { size: 800, hit_rate: 0.7 }
+  ];
+  assert.equal(chart.cacheCurveAxisMax(points, 1000), 1000, "10 倍以内的配置容量纳入轴范围");
+  assert.equal(chart.cacheCurveAxisMax(points, 10000), 800, "配置远超观测时不为它撑大坐标轴");
+  assert.equal(chart.cacheCurveAxisMax(points, 0), 800);
+  assert.equal(chart.cacheCurveAxisMax([{ size: 1234, hit_rate: 1 }], 0), 2000, "上限向上取整到易读刻度");
+  assert.equal(chart.cacheCurveAxisMax([], 0), 1, "无数据时退化为 1");
+});

@@ -140,10 +140,14 @@ mod tests {
 
     #[tokio::test]
     async fn serves_udp_query_end_to_end() {
+        let cache = std::sync::Arc::new(crate::cache::Cache::new(16));
         let pipeline = crate::pipeline::Pipeline::new(crate::pipeline::PipelineParts {
             hosts: crate::hosts::HostsMap::from_entries(&[]),
             filter: std::sync::Arc::new(crate::filter::Filter::new(&[])),
-            cache: std::sync::Arc::new(crate::cache::Cache::new(16)),
+            cache: cache.clone(),
+            cache_sampler: std::sync::Arc::new(crate::dashboard::sampler::CacheHitSampler::new(
+                cache,
+            )),
             upstream: std::sync::Arc::new(EchoOk),
             ecs: None,
             query_timeout: Duration::from_secs(5),
@@ -186,10 +190,12 @@ mod tests {
             release: tokio::sync::Notify::new(),
         });
         let release = resolver.clone();
+        let cache = Arc::new(crate::cache::Cache::new(16));
         let pipeline = crate::pipeline::Pipeline::new(crate::pipeline::PipelineParts {
             hosts: crate::hosts::HostsMap::from_entries(&[]),
             filter: Arc::new(crate::filter::Filter::new(&[])),
-            cache: Arc::new(crate::cache::Cache::new(16)),
+            cache: cache.clone(),
+            cache_sampler: Arc::new(crate::dashboard::sampler::CacheHitSampler::new(cache)),
             upstream: resolver,
             ecs: None,
             query_timeout: Duration::from_secs(5),
