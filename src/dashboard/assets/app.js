@@ -73,6 +73,13 @@
     return action === "render" ? "success" : "superseded";
   }
 
+  function averageResponseText(data) {
+    const samples = normalizeCount(data && data.samples);
+    const avg = Number(data && data.avg_ms);
+    if (samples === 0 || !Number.isFinite(avg) || avg < 0) return "--";
+    return `${avg >= 100 ? Math.round(avg) : avg.toFixed(1)} ms`;
+  }
+
   function upstreamStatus(upstream) {
     const samples = normalizeCount(upstream.samples);
     const successes = normalizeCount(upstream.successes);
@@ -91,11 +98,12 @@
       queryLoading: false, totalPages: null, requestedPage: 1, trendData: null,
       cacheData: null, queryRequestId: 0
     };
-    const regionNames = ["trend", "cache", "upstreams", "rankings", "queries"];
+    const regionNames = ["trend", "cache", "upstreams", "rankings", "queries", "response"];
     const roundTracker = createRoundTracker(regionNames);
     const regions = Object.fromEntries(regionNames.map((name) => [name, document.querySelector(`#${name}`)]));
     const previousButton = document.querySelector("#previous-page");
     const nextButton = document.querySelector("#next-page");
+    const refreshButton = document.querySelector("#refresh-button");
 
     function element(tag, text, className) {
       const node = document.createElement(tag);
@@ -122,12 +130,14 @@
     function beginRefreshStatus() {
       const status = document.querySelector("#refresh-status");
       const dot = document.querySelector(".status-dot");
+      refreshButton.disabled = true;
       status.removeAttribute("aria-live");
       status.textContent = "正在更新";
       dot.className = "status-dot is-loading";
     }
     function finishRefreshStatus(result) {
       if (!result?.complete) return;
+      refreshButton.disabled = false;
       const status = document.querySelector("#refresh-status");
       const dot = document.querySelector(".status-dot");
       status.textContent = result.success ? "全部区域已更新" : result.failed ? `${result.failed} 个区域更新失败` : "部分区域已被新请求替代";
@@ -140,7 +150,9 @@
         dot.className = "status-dot has-error";
       }
     }
-    async function loadRegion(name, url, render) {
+    async function loadRegion(name, url, render, report) {
+      // report 用于没有 .panel-error 的小区域（如标题里的平均响应耗时）自定义失败提示
+      const notify = report || ((message) => setError(name, message));
       state.controllers.get(name)?.abort();
       const controller = new AbortController();
       state.controllers.set(name, controller);
@@ -150,12 +162,12 @@
         const data = await response.json();
         if (state.controllers.get(name) !== controller) return "superseded";
         await render(data);
-        setError(name, "");
+        notify("");
         return "success";
       } catch (error) {
         const result = classifyRegionResult({ aborted: error.name === "AbortError", current: state.controllers.get(name) === controller, failed: true });
         if (result === "failure") {
-          setError(name, "更新失败，正在保留上次数据");
+          notify("更新失败，正在保留上次数据");
         }
         return result;
       } finally {
@@ -212,6 +224,12 @@
         card.append(heading, metrics); return card;
       }));
     }
+    function renderResponseTime(data) {
+      document.querySelector("#avg-response-value").textContent = averageResponseText(data);
+    }
+    function reportResponseError(message) {
+      document.querySelector("#avg-response-value").classList.toggle("has-error", Boolean(message));
+    }
     function emptyRow(columns, message) {
       const row = element("tr"); const cell = element("td", message, "empty"); cell.colSpan = columns; row.append(cell); return row;
     }
@@ -264,6 +282,7 @@
         ["trend", loadRegion("trend", "/api/dashboard/trend", renderTrend)],
         ["cache", loadRegion("cache", "/api/dashboard/cache-curve", renderCache)],
         ["upstreams", loadRegion("upstreams", "/api/dashboard/upstreams", renderUpstreams)],
+        ["response", loadRegion("response", "/api/dashboard/response-time", renderResponseTime, reportResponseError)],
         ["rankings", loadRegion("rankings", "/api/dashboard/rankings", renderRankings)],
         ["queries", loadQueries(false, roundId)]
       ];
@@ -286,8 +305,10 @@
       if (state.trendData) window.DnsTrendChart.render(document.querySelector("#trend-chart"), state.trendData.buckets, state.trendData.granularity);
       if (state.cacheData) window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), state.cacheData);
     }, 120); });
-    updatePagination(); refreshAll(); window.setInterval(refreshAll, 5000);
+    // 手动刷新：不做定时轮询，用户点击时服务端才计算各区域统计，减轻服务端压力
+    refreshButton.addEventListener("click", refreshAll);
+    updatePagination(); refreshAll();
   }
 
-  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, upstreamStatus };
+  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, upstreamStatus, averageResponseText };
 }));

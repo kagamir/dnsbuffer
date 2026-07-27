@@ -15,6 +15,7 @@
     <div class="refresh-meta">
       <div class="live-status"><span class="status-dot" aria-hidden="true"></span><span id="refresh-status">正在载入</span></div>
       <span id="last-updated">尚未完成更新</span>
+      <button id="refresh-button" type="button">刷新数据</button>
     </div>
   </header>
 
@@ -46,7 +47,13 @@
 
     <div class="split-grid">
       <section id="upstreams" class="panel" aria-labelledby="upstream-title">
-        <div class="panel-heading"><div><p class="section-index">03 / NETWORK</p><h2 id="upstream-title">上游状态</h2></div></div>
+        <div class="panel-heading">
+          <div><p class="section-index">03 / NETWORK</p><h2 id="upstream-title">上游状态</h2></div>
+          <div id="response" class="avg-response">
+            <span class="avg-response-label">平均响应耗时</span>
+            <strong id="avg-response-value" title="从请求进入服务到返回应答的平均耗时">--</strong>
+          </div>
+        </div>
         <p class="panel-error" role="status" aria-live="polite"></p>
         <div id="upstream-list" class="upstream-list"><p class="empty">正在载入上游数据...</p></div>
       </section>

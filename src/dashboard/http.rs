@@ -12,7 +12,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::sampler::CacheHitSampler;
-use super::store::{QueryPage, QueryRecord, Ranking, Store, TrendBucket, TrendResponse};
+use super::store::{
+    QueryPage, QueryRecord, Ranking, ResponseTimeSummary, Store, TrendBucket, TrendResponse,
+};
 use super::upstreams::UpstreamMetrics;
 
 const DATABASE_ERROR: &str = "dashboard database unavailable";
@@ -50,6 +52,7 @@ pub fn router(state: HttpState) -> Router {
         .route("/api/dashboard/queries", get(queries))
         .route("/api/dashboard/rankings", get(rankings))
         .route("/api/dashboard/upstreams", get(upstreams))
+        .route("/api/dashboard/response-time", get(response_time))
         .route("/api/dashboard/cache-curve", get(cache_curve))
         .with_state(state)
 }
@@ -171,6 +174,17 @@ async fn upstreams(
     State(state): State<HttpState>,
 ) -> Json<Vec<super::upstreams::UpstreamSnapshot>> {
     Json(state.upstreams.snapshot())
+}
+
+async fn response_time(
+    State(state): State<HttpState>,
+) -> Result<Json<ResponseTimeSummary>, ApiError> {
+    Ok(Json(
+        database_call(state.store, state.database_reads, |store, deadline| {
+            store.response_time_before(deadline)
+        })
+        .await?,
+    ))
 }
 
 async fn cache_curve(State(state): State<HttpState>) -> Json<CacheCurveDto> {

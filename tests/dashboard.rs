@@ -633,6 +633,11 @@ async fn all_api_routes_are_json_read_only_and_use_utc_times() {
     assert_eq!(upstreams[0]["failure_rate"], 0.0);
     assert!(upstreams[0]["avg_latency_ms"].is_null());
 
+    let response_time = json(request(app.clone(), "/api/dashboard/response-time").await).await;
+    assert_eq!(response_time["samples"], 3);
+    // durations: 12 + 25 + 12
+    assert!((response_time["avg_ms"].as_f64().unwrap() - 49.0 / 3.0).abs() < 1e-9);
+
     let rankings = json(request(app.clone(), "/api/dashboard/rankings").await).await;
     assert_eq!(rankings[0]["domain"], "popular.example");
     assert_eq!(rankings[0]["total_queries"], 2);
@@ -709,6 +714,7 @@ async fn database_failures_return_sanitized_consistent_errors() {
         "/api/dashboard/trend",
         "/api/dashboard/queries",
         "/api/dashboard/rankings",
+        "/api/dashboard/response-time",
     ] {
         let response = request(app.clone(), uri).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -903,6 +909,8 @@ async fn embedded_frontend_contract() {
         "id=\"previous-page\"",
         "id=\"next-page\"",
         "id=\"refresh-status\"",
+        "id=\"refresh-button\"",
+        "id=\"avg-response-value\"",
         "id=\"trend-range\"",
         "id=\"trend-summary\"",
         "aria-label=",
@@ -912,7 +920,8 @@ async fn embedded_frontend_contract() {
 
     let app_js = text(request(app.clone(), "/assets/app.js").await).await;
     for marker in [
-        "5000",
+        "refresh-button",
+        "response-time",
         "AbortController",
         "encodeURIComponent(state.search)",
         "page: 1",

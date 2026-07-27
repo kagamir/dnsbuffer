@@ -288,6 +288,14 @@ pub struct Ranking {
     pub cache_hits: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct ResponseTimeSummary {
+    /// 参与统计的查询条数（保留窗口内的全部明细）。
+    pub samples: i64,
+    /// duration_ms 的平均值；无记录时为 null。
+    pub avg_ms: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
@@ -685,6 +693,31 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn response_time(&self) -> Result<ResponseTimeSummary> {
+        self.response_time_with_deadline(None)
+    }
+
+    pub fn response_time_before(&self, deadline: Instant) -> Result<ResponseTimeSummary> {
+        self.response_time_with_deadline(Some(deadline))
+    }
+
+    /// 平均响应耗时：duration_ms 记录的是请求进入 pipeline 到生成应答的
+    /// 全程耗时，这里对保留窗口内的全部明细求平均。不做预聚合，
+    /// 由前端手动刷新时按需计算。
+    fn response_time_with_deadline(&self, deadline: Option<Instant>) -> Result<ResponseTimeSummary> {
+        let conn = self.read_connection(deadline)?;
+        Ok(conn.query_row(
+            "SELECT COUNT(*), AVG(duration_ms) FROM query_logs",
+            [],
+            |row| {
+                Ok(ResponseTimeSummary {
+                    samples: row.get(0)?,
+                    avg_ms: row.get(1)?,
+                })
+            },
+        )?)
+    }
+
     fn read_connection(&self, deadline: Option<Instant>) -> Result<Connection> {
         let conn = self.connect()?;
         if let Some(deadline) = deadline {
@@ -1014,6 +1047,24 @@ mod tests {
             1
         );
         assert_eq!(scalar(&conn, "SELECT cache_hits FROM query_daily_stats"), 1);
+    }
+
+    #[test]
+    fn response_time_averages_all_retained_durations() {
+        let (_guard, store) = test_store("response-time");
+        let empty = store.response_time().unwrap();
+        assert_eq!(empty.samples, 0);
+        assert!(empty.avg_ms.is_none(), "无记录时平均值为 null");
+
+        let mut fast = event(1_753_488_000_000, "fast.example", &[]);
+        fast.duration_ms = 10;
+        let mut slow = event(1_753_488_000_500, "slow.example", &[]);
+        slow.duration_ms = 30;
+        store.insert_events(&[fast, slow]).unwrap();
+
+        let summary = store.response_time().unwrap();
+        assert_eq!(summary.samples, 2);
+        assert_eq!(summary.avg_ms, Some(20.0));
     }
 
     #[test]

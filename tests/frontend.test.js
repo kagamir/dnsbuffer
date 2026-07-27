@@ -108,6 +108,14 @@ test("upstream status distinguishes no samples, unavailable, degraded, and healt
   assert.deepEqual(dashboard.upstreamStatus({ samples: 4, successes: 4, failure_rate: 0 }), { text: "正常", kind: "good" });
 });
 
+test("average response time formats milliseconds and degrades to placeholder", () => {
+  assert.equal(dashboard.averageResponseText({ samples: 3, avg_ms: 16.333 }), "16.3 ms");
+  assert.equal(dashboard.averageResponseText({ samples: 10, avg_ms: 234.6 }), "235 ms");
+  assert.equal(dashboard.averageResponseText({ samples: 0, avg_ms: null }), "--");
+  assert.equal(dashboard.averageResponseText({ samples: 2, avg_ms: "broken" }), "--");
+  assert.equal(dashboard.averageResponseText(undefined), "--");
+});
+
 test("chart counts use safe finite number normalization", () => {
   assert.equal(chart.normalizeValue(Infinity), 0);
   assert.equal(chart.normalizeValue("not-a-number"), 0);
