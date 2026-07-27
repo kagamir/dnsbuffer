@@ -34,7 +34,9 @@ impl Resolver for PlainResolver {
         } else {
             "0.0.0.0:0"
         };
-        let sock = UdpSocket::bind(bind).await.context("binding local socket")?;
+        let sock = UdpSocket::bind(bind)
+            .await
+            .context("binding local socket")?;
         sock.connect(self.addr)
             .await
             .with_context(|| format!("connecting to upstream {}", self.addr))?;

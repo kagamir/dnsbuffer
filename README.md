@@ -16,6 +16,7 @@
 - **广告屏蔽**：adblock 语法子集（`||domain^`、`@@||domain^` 例外）+ hosts 语法 + 纯域名列表；本地文件与远程 URL 混用，远程源支持按周期热更新（ArcSwap 无锁替换）；命中返回 `0.0.0.0` / `::`；豁免列表优先
 - **EDNS 客户端子网（ECS）**：配置 `fixed_subnet` 则注入该子网，不配置则不使用 ECS；始终剥离客户端自带 ECS 保护隐私
 - **健壮性**：响应 id 全链路校验、单查询总超时预算、任何上游故障均降级为 SERVFAIL 而非崩溃
+- **查询仪表板**：内置 Web 页面展示查询趋势、查询明细、域名排名和上游滑动窗口状态，查询记录保存在 SQLite
 
 ## 构建
 
@@ -38,6 +39,8 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 - 配置路径默认 `config.toml`（`-c` / `--config` 指定）
 - 日志级别在配置文件 `[log] level` 设置（默认 `info`）；`RUST_LOG` 环境变量优先，便于临时调试，如 `RUST_LOG=debug dnsbuffer ...`
 - 级别约定：启动信息（"dnsbuffer starting" / "listening on udp"）为 WARN，配置问题为 WARN，请求失败与重试/切换 fallback 等运行期波动为 INFO——设 `level = "warn"` 可只保留启动与配置告警
+- 仪表板默认访问地址为 `http://<主机IP>:8080/`。它没有认证；将 `[dashboard] listen` 设为 `0.0.0.0:8080` 会向所有可达网络暴露查询历史。应使用防火墙将 TCP 8080 限制到可信网段；如需额外访问控制，可选用带认证的反向代理
+- SQLite 数据库会在启动时创建并迁移；路径不可写、目录不存在或数据库初始化失败会使整个程序启动失败，DNS 服务也不会启动
 
 ## Docker
 
@@ -47,17 +50,21 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 docker pull ghcr.io/kagamir/dnsbuffer:latest
 ```
 
-镜像基于 distroless（无 shell，仅含运行所需的 glibc），默认以 root 运行以便绑定 53 端口，内置一份示例配置在 `/etc/dnsbuffer/config.toml`。生产环境请挂载自己的配置覆盖它：
+镜像基于 distroless（无 shell，仅含运行所需的 glibc），内置一份示例配置在 `/etc/dnsbuffer/config.toml`。生产环境请挂载自己的配置覆盖它：
 
 ```bash
 docker run -d --name dnsbuffer \
   --restart unless-stopped \
   -p 53:53/udp \
+  -p 8080:8080/tcp \
   -v /etc/dnsbuffer/config.toml:/etc/dnsbuffer/config.toml:ro \
+  -v /var/lib/dnsbuffer:/var/lib/dnsbuffer \
   ghcr.io/kagamir/dnsbuffer:latest
 ```
 
 - 配置中 `listen` 需为 `0.0.0.0:53`（容器内监听全部网卡），宿主侧用 `-p` 映射端口
+- 仅挂载 `/var/lib/dnsbuffer` 不会自动改变数据库位置；挂载的配置还必须显式设置 `[dashboard] database_path = "/var/lib/dnsbuffer/dnsbuffer.db"`，SQLite 才会持久化到该卷。内置配置使用相对路径 `dnsbuffer.db`，其位置取决于容器工作目录，不保证落在挂载卷中
+- 本 Dockerfile 没有覆盖基础镜像的 `USER`；挂载的 `/var/lib/dnsbuffer` 必须对镜像的实际运行用户可写，否则 SQLite 初始化失败会阻止程序启动
 - 临时调试可加 `-e RUST_LOG=debug`
 - 若挂载了远程规则源的本地文件（`[[adblock.rule_source]] path = ...`），一并 `-v` 进容器
 - 可用标签：`latest`、`vX.Y.Z`、`X.Y`（如 `v0.1.0`、`0.1`）
@@ -75,6 +82,11 @@ hedged_retry_ms = 1000       # 对冲式重试间隔（毫秒）；0 禁用
 
 [log]
 level = "info"               # error | warn | info | debug | trace；RUST_LOG 环境变量优先
+
+[dashboard]
+listen = "0.0.0.0:8080"      # 无认证；仅暴露到可信网络，或使用带认证的反向代理
+database_path = "dnsbuffer.db" # 相对路径以进程工作目录为基准；初始化失败将阻止程序启动
+retention_days = 7            # 允许 0-9999；0 表示永久保留
 
 [cache]
 max_entries = 10000          # LRU 缓存最大条数
@@ -137,6 +149,15 @@ addr = "1.1.1.1:53"
 type = "plain"
 addr = "8.8.8.8:53"
 ```
+
+### 仪表板数据口径
+
+- **查询趋势**：按保留期展示总查询数、广告屏蔽数和缓存命中数；`retention_days` 为 1 至 15 天时按小时（最多 361 桶），16 天及以上按天，0（永久保留）固定展示最近 30 个 UTC 日历桶。正数保留期的首尾时间是首、末桶的 RFC 3339 起点，返回所有与精确保留窗口相交的桶，因此非整点/非午夜请求通常比天数换算值多一个部分桶
+- **查询明细**：显示时间、查询域名、类型、响应码、耗时、屏蔽/缓存状态和响应 IP；搜索对域名和响应 IP 做完整包含匹配，前导通配语义需要扫描现存数据，索引主要保证分页、关联和精确前缀结构，不虚称加速任意片段搜索。API 每页默认 50、最多 200 条；不搜索客户端 IP（dnsbuffer 不采集客户端 IP）
+- **域名排名**：单个域名前 20 列表，按查询次数排序，并为每个域名附带总查询、屏蔽和缓存命中计数
+- **上游状态**：来自进程内滑动窗口，只反映最近样本的成功率和平均延迟，不是 SQLite 保留期内的历史汇总，重启后重新统计
+
+`retention_days` 默认是 7，允许范围为 0 到 9999。设置为正数时，程序会定期清理早于该天数的查询明细，只删除完整落在截止点之前的聚合桶；设置为 0 时不清理 SQLite 历史。单条 DNS 包最大 65535 字节，因此响应 IP 数量天然有协议上限；服务不截断 IP，避免破坏反查口径，而 HTTP 每页 200 条限制响应规模。`database_path` 的相对路径相对于 dnsbuffer 的进程工作目录，而不是配置文件所在目录。
 
 ### 查询处理顺序
 
@@ -201,7 +222,7 @@ src/
   tls.rs          rustls 客户端配置（含 ECH）
 ```
 
-测试：`cargo test`（70 项：单元 + 端到端集成，含 mock DoT/DoH/H3/HTTP 服务器）。
+测试：`cargo test --all-targets --all-features`（单元 + 端到端集成，含 mock DoT/DoH/H3/HTTP 服务器）。
 
 ## 已知限制
 

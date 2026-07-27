@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use hickory_proto::op::Message;
 use rustls_pki_types::ServerName;
@@ -165,7 +165,10 @@ mod tests {
         let (addr, root) = spawn_mock_dot_server(false).await;
         let tls = Arc::new(crate::tls::client_config(&[], &[root], None).unwrap());
         let resolver = DotResolver::new(addr, "localhost", tls).unwrap();
-        let resp = resolver.resolve(&sample_query()).await.expect("dot resolve");
+        let resp = resolver
+            .resolve(&sample_query())
+            .await
+            .expect("dot resolve");
         assert_eq!(resp.metadata.id, 0x5151);
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }

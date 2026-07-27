@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 use hickory_proto::op::Message;
@@ -70,7 +70,11 @@ impl DohResolver {
         }
         let mut ips = ips;
         crate::upstream::sort_by_family(&mut ips, prefer_ipv6);
-        let tls_h2 = Arc::new(crate::tls::client_config(&[b"h2"], extra_roots, ech.as_deref())?);
+        let tls_h2 = Arc::new(crate::tls::client_config(
+            &[b"h2"],
+            extra_roots,
+            ech.as_deref(),
+        )?);
         let h3 = if http3 {
             let tls_h3 = crate::tls::client_config(&[b"h3"], extra_roots, ech.as_deref())?;
             Some(crate::upstream::doh3::H3Conn::new(
@@ -263,41 +267,43 @@ mod tests {
         tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let tls = acceptor.accept(tcp).await.unwrap();
-            let service = service_fn(move |req: hyper::Request<hyper::body::Incoming>| async move {
-                if req.method() != hyper::Method::POST || req.uri().path() != "/dns-query" {
-                    return Ok::<_, std::convert::Infallible>(
+            let service = service_fn(
+                move |req: hyper::Request<hyper::body::Incoming>| async move {
+                    if req.method() != hyper::Method::POST || req.uri().path() != "/dns-query" {
+                        return Ok::<_, std::convert::Infallible>(
+                            hyper::Response::builder()
+                                .status(400)
+                                .body(Full::new(Bytes::new()))
+                                .unwrap(),
+                        );
+                    }
+                    let body = req.into_body().collect().await.unwrap().to_bytes();
+                    let query = Message::from_vec(&body).unwrap();
+                    let mut resp =
+                        Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+                    resp.metadata.response_code = ResponseCode::NoError;
+                    for q in &query.queries {
+                        resp.add_query(q.clone());
+                    }
+                    if let Some(ip) = answer_ip {
+                        use hickory_proto::rr::rdata::{A, AAAA};
+                        use hickory_proto::rr::{RData, Record};
+                        let rdata = match ip {
+                            std::net::IpAddr::V4(v4) => RData::A(A(v4)),
+                            std::net::IpAddr::V6(v6) => RData::AAAA(AAAA(v6)),
+                        };
+                        let name = query.queries[0].name().clone();
+                        resp.add_answer(Record::from_rdata(name, 300, rdata));
+                    }
+                    Ok::<_, std::convert::Infallible>(
                         hyper::Response::builder()
-                            .status(400)
-                            .body(Full::new(Bytes::new()))
+                            .status(200)
+                            .header("content-type", "application/dns-message")
+                            .body(Full::new(Bytes::from(resp.to_vec().unwrap())))
                             .unwrap(),
-                    );
-                }
-                let body = req.into_body().collect().await.unwrap().to_bytes();
-                let query = Message::from_vec(&body).unwrap();
-                let mut resp =
-                    Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
-                resp.metadata.response_code = ResponseCode::NoError;
-                for q in &query.queries {
-                    resp.add_query(q.clone());
-                }
-                if let Some(ip) = answer_ip {
-                    use hickory_proto::rr::rdata::{A, AAAA};
-                    use hickory_proto::rr::{RData, Record};
-                    let rdata = match ip {
-                        std::net::IpAddr::V4(v4) => RData::A(A(v4)),
-                        std::net::IpAddr::V6(v6) => RData::AAAA(AAAA(v6)),
-                    };
-                    let name = query.queries[0].name().clone();
-                    resp.add_answer(Record::from_rdata(name, 300, rdata));
-                }
-                Ok::<_, std::convert::Infallible>(
-                    hyper::Response::builder()
-                        .status(200)
-                        .header("content-type", "application/dns-message")
-                        .body(Full::new(Bytes::from(resp.to_vec().unwrap())))
-                        .unwrap(),
-                )
-            });
+                    )
+                },
+            );
             hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(tls), service)
                 .await
@@ -349,8 +355,8 @@ mod tests {
 
     #[tokio::test]
     async fn prefers_ipv6_when_configured() {
-        use hickory_proto::rr::rdata::AAAA;
         use hickory_proto::rr::RData;
+        use hickory_proto::rr::rdata::AAAA;
         let (port, roots) = spawn_dual_family_servers().await;
         let url = format!("https://localhost:{port}/dns-query");
         // 配置顺序故意 v4 在前：prefer_ipv6 = true 时仍必须先连 IPv6
@@ -373,8 +379,8 @@ mod tests {
 
     #[tokio::test]
     async fn prefers_ipv4_by_default() {
-        use hickory_proto::rr::rdata::A;
         use hickory_proto::rr::RData;
+        use hickory_proto::rr::rdata::A;
         let (port, roots) = spawn_dual_family_servers().await;
         let url = format!("https://localhost:{port}/dns-query");
         // 配置顺序故意 v6 在前：默认（prefer_ipv6 = false）必须先连 IPv4

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dnsbuffer 运维面板</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div>
+      <p class="eyebrow">DNS OPERATIONS</p>
+      <h1>dnsbuffer</h1>
+    </div>
+    <div class="refresh-meta">
+      <div class="live-status"><span class="status-dot" aria-hidden="true"></span><span id="refresh-status">正在载入</span></div>
+      <span id="last-updated">尚未完成更新</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="trend" class="panel trend-panel" aria-labelledby="trend-title">
+      <div class="panel-heading">
+        <div><p class="section-index">01 / TRAFFIC</p><h2 id="trend-title">查询趋势</h2><p id="trend-range" class="trend-range">正在载入数据范围...</p></div>
+        <div class="legend" aria-label="图表图例">
+          <span><i class="legend-total" aria-hidden="true"></i>全部查询</span>
+          <span><i class="legend-blocked" aria-hidden="true"></i>已屏蔽</span>
+          <span><i class="legend-cache" aria-hidden="true"></i>缓存命中</span>
+        </div>
+      </div>
+      <p class="panel-error" role="status" aria-live="polite"></p>
+      <canvas id="trend-chart" aria-label="全部查询、已屏蔽和缓存命中的时间趋势图" role="img"></canvas>
+      <p id="trend-summary" class="sr-only">查询趋势正在载入</p>
+    </section>
+
+    <div class="split-grid">
+      <section id="upstreams" class="panel" aria-labelledby="upstream-title">
+        <div class="panel-heading"><div><p class="section-index">02 / NETWORK</p><h2 id="upstream-title">上游状态</h2></div></div>
+        <p class="panel-error" role="status" aria-live="polite"></p>
+        <div id="upstream-list" class="upstream-list"><p class="empty">正在载入上游数据...</p></div>
+      </section>
+
+      <section id="rankings" class="panel" aria-labelledby="ranking-title">
+        <div class="panel-heading"><div><p class="section-index">03 / DOMAINS</p><h2 id="ranking-title">域名排行</h2></div></div>
+        <p class="panel-error" role="status" aria-live="polite"></p>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th scope="col">域名</th><th scope="col">查询</th><th scope="col">屏蔽</th><th scope="col">缓存</th></tr></thead>
+            <tbody id="ranking-body"><tr><td colspan="4" class="empty">正在载入排行...</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section id="queries" class="panel" aria-labelledby="query-title">
+      <div class="query-heading">
+        <div><p class="section-index">04 / EVENT LOG</p><h2 id="query-title">最近查询</h2></div>
+        <label class="search-label" for="query-search"><span>搜索域名或响应 IP</span><input id="query-search" type="search" maxlength="253" autocomplete="off" placeholder="example.com / 1.1.1.1"></label>
+      </div>
+      <p class="panel-error" role="status" aria-live="polite"></p>
+      <div class="table-scroll">
+        <table class="query-table">
+          <thead><tr><th scope="col">本地时间</th><th scope="col">域名 / 类型</th><th scope="col">响应 IP</th><th scope="col">耗时</th><th scope="col">结果</th></tr></thead>
+          <tbody id="query-body"><tr><td colspan="5" class="empty">正在载入查询记录...</td></tr></tbody>
+        </table>
+      </div>
+      <nav class="pagination" aria-label="查询记录分页">
+        <button id="previous-page" type="button">上一页</button>
+        <span id="page-status">第 1 页</span>
+        <button id="next-page" type="button">下一页</button>
+      </nav>
+    </section>
+  </main>
+  <script src="/assets/chart.js"></script>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

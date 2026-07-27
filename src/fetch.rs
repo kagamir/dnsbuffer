@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use http_body_util::{BodyExt, Empty};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
@@ -17,7 +17,9 @@ const MAX_REDIRECTS: usize = 3;
 pub async fn fetch_url(url: &str, bootstrap: &Bootstrap) -> Result<Vec<u8>> {
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
-        let uri: http::Uri = current.parse().with_context(|| format!("invalid url {current}"))?;
+        let uri: http::Uri = current
+            .parse()
+            .with_context(|| format!("invalid url {current}"))?;
         let https = match uri.scheme_str() {
             Some("https") => true,
             Some("http") => false,
@@ -46,12 +48,15 @@ pub async fn fetch_url(url: &str, bootstrap: &Bootstrap) -> Result<Vec<u8>> {
                 Err(e) => last_err = Some(e.into()),
             }
         }
-        let tcp = tcp.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("no ips for {host}")))?;
+        let tcp =
+            tcp.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("no ips for {host}")))?;
 
         let path = if uri.path().is_empty() {
             "/".to_string()
         } else {
-            uri.path_and_query().map(|pq| pq.to_string()).unwrap_or_else(|| "/".into())
+            uri.path_and_query()
+                .map(|pq| pq.to_string())
+                .unwrap_or_else(|| "/".into())
         };
         let req = http::Request::builder()
             .method(http::Method::GET)
@@ -65,7 +70,10 @@ pub async fn fetch_url(url: &str, bootstrap: &Bootstrap) -> Result<Vec<u8>> {
         let resp = if https {
             let tls_cfg = Arc::new(crate::tls::client_config(&[b"http/1.1"], &[], None)?);
             let sn = ServerName::try_from(host.clone()).context("invalid server name")?;
-            let tls = TlsConnector::from(tls_cfg).connect(sn, tcp).await.context("TLS handshake")?;
+            let tls = TlsConnector::from(tls_cfg)
+                .connect(sn, tcp)
+                .await
+                .context("TLS handshake")?;
             let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
                 .await
                 .context("h1 handshake")?;
@@ -150,7 +158,8 @@ pub(crate) mod tests {
                 } else if path == "/redirect" {
                     "HTTP/1.1 302 Found\r\nlocation: /rules.txt\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
                 } else {
-                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
                 };
                 let _ = sock.write_all(resp.as_bytes()).await;
                 let _ = sock.shutdown().await;
@@ -175,7 +184,9 @@ pub(crate) mod tests {
     async fn follows_redirect() {
         let addr = spawn_http_server("redirected-content\n").await;
         let url = format!("http://{addr}/redirect");
-        let body = fetch_url(&url, &empty_bootstrap()).await.expect("fetch via redirect");
+        let body = fetch_url(&url, &empty_bootstrap())
+            .await
+            .expect("fetch via redirect");
         assert_eq!(String::from_utf8_lossy(&body), "redirected-content\n");
     }
 

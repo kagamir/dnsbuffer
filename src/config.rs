@@ -1,7 +1,7 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -24,6 +24,8 @@ pub struct Config {
     pub fallback: Vec<UpstreamConfig>,
     #[serde(default)]
     pub selector: SelectorConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
 }
 
 fn default_query_timeout_ms() -> u64 {
@@ -66,7 +68,9 @@ pub struct LogConfig {
 
 impl Default for LogConfig {
     fn default() -> Self {
-        Self { level: default_log_level() }
+        Self {
+            level: default_log_level(),
+        }
     }
 }
 
@@ -107,6 +111,38 @@ fn default_window() -> usize {
 
 fn default_k() -> f64 {
     5.0
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DashboardConfig {
+    #[serde(default = "default_dashboard_listen")]
+    pub listen: SocketAddr,
+    #[serde(default = "default_database_path")]
+    pub database_path: PathBuf,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_dashboard_listen(),
+            database_path: default_database_path(),
+            retention_days: default_retention_days(),
+        }
+    }
+}
+
+fn default_dashboard_listen() -> SocketAddr {
+    "0.0.0.0:8080".parse().unwrap()
+}
+
+fn default_database_path() -> PathBuf {
+    PathBuf::from("dnsbuffer.db")
+}
+
+fn default_retention_days() -> u32 {
+    7
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -197,6 +233,12 @@ impl Config {
         if self.upstream.is_empty() {
             bail!("config must define at least one [[upstream]]");
         }
+        if self.dashboard.database_path.as_os_str().is_empty() {
+            bail!("dashboard database_path must not be empty");
+        }
+        if self.dashboard.retention_days > 9_999 {
+            bail!("dashboard retention_days must be between 0 and 9999");
+        }
         for b in &self.bootstrap.servers {
             if let UpstreamConfig::Doh { ip: None, url, .. } = b {
                 bail!("bootstrap doh {url} must specify ip (chicken-and-egg)");
@@ -244,7 +286,10 @@ mod tests {
             listen = "127.0.0.1:5300"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.validate().is_err(), "empty upstream must fail validation");
+        assert!(
+            cfg.validate().is_err(),
+            "empty upstream must fail validation"
+        );
     }
 
     #[test]
@@ -259,7 +304,12 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         match &cfg.upstream[0] {
-            UpstreamConfig::Doh { url, ech, http3, ip } => {
+            UpstreamConfig::Doh {
+                url,
+                ech,
+                http3,
+                ip,
+            } => {
                 assert_eq!(url, "https://dns.example/dns-query");
                 assert!(ech.is_empty());
                 assert!(!*http3, "http3 defaults to false (opt-in via http3 = true)");
@@ -312,10 +362,19 @@ mod tests {
 
     #[test]
     fn split_domain_port_defaults_to_853() {
-        assert_eq!(split_domain_port("dns.quad9.net").unwrap(), ("dns.quad9.net".into(), 853));
-        assert_eq!(split_domain_port("dns.quad9.net:8853").unwrap(), ("dns.quad9.net".into(), 8853));
+        assert_eq!(
+            split_domain_port("dns.quad9.net").unwrap(),
+            ("dns.quad9.net".into(), 853)
+        );
+        assert_eq!(
+            split_domain_port("dns.quad9.net:8853").unwrap(),
+            ("dns.quad9.net".into(), 8853)
+        );
         assert!(split_domain_port("dns.quad9.net:notaport").is_err());
-        assert!(split_domain_port("dns.quad9.net:99999").is_err(), "port out of u16 range");
+        assert!(
+            split_domain_port("dns.quad9.net:99999").is_err(),
+            "port out of u16 range"
+        );
     }
 
     #[test]
@@ -344,7 +403,10 @@ mod tests {
             addr = "1.1.1.1:53"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.ecs.fixed_subnet.is_none(), "no fixed_subnet means ECS off");
+        assert!(
+            cfg.ecs.fixed_subnet.is_none(),
+            "no fixed_subnet means ECS off"
+        );
         let with = r#"
             [server]
             listen = "127.0.0.1:5300"
@@ -375,7 +437,10 @@ mod tests {
             url = "https://bootstrap.example/dns-query"
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
-        assert!(cfg.validate().is_err(), "bootstrap doh without ip must fail");
+        assert!(
+            cfg.validate().is_err(),
+            "bootstrap doh without ip must fail"
+        );
     }
 
     #[test]
@@ -390,8 +455,14 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml).expect("parse");
         assert_eq!(cfg.server.query_timeout_ms, 10_000);
-        assert_eq!(cfg.server.upstream_timeout_ms, 5_000, "primary upstream budget defaults to 5s");
-        assert_eq!(cfg.server.hedged_retry_ms, 1_000, "hedged retry interval defaults to 1s");
+        assert_eq!(
+            cfg.server.upstream_timeout_ms, 5_000,
+            "primary upstream budget defaults to 5s"
+        );
+        assert_eq!(
+            cfg.server.hedged_retry_ms, 1_000,
+            "hedged retry interval defaults to 1s"
+        );
     }
 
     #[test]
@@ -406,8 +477,8 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(&base.replace("{extra}", "")).expect("parse");
         assert_eq!(cfg.log.level, "info");
-        let cfg: Config = toml::from_str(&base.replace("{extra}", "[log]\nlevel = \"warn\"\n"))
-            .expect("parse");
+        let cfg: Config =
+            toml::from_str(&base.replace("{extra}", "[log]\nlevel = \"warn\"\n")).expect("parse");
         assert_eq!(cfg.log.level, "warn");
     }
 
@@ -415,6 +486,64 @@ mod tests {
     fn example_config_stays_valid() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         load(&path).expect("config.example.toml must parse and validate");
+    }
+
+    #[test]
+    fn dashboard_defaults_and_overrides() {
+        let base = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            {dashboard}
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(&base.replace("{dashboard}", "")).unwrap();
+        assert_eq!(cfg.dashboard.listen, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(cfg.dashboard.database_path, PathBuf::from("dnsbuffer.db"));
+        assert_eq!(cfg.dashboard.retention_days, 7);
+
+        let custom = "[dashboard]\nlisten = \"127.0.0.1:9090\"\ndatabase_path = \"data/stats.db\"\nretention_days = 0";
+        let cfg: Config = toml::from_str(&base.replace("{dashboard}", custom)).unwrap();
+        assert_eq!(cfg.dashboard.listen, "127.0.0.1:9090".parse().unwrap());
+        assert_eq!(cfg.dashboard.database_path, PathBuf::from("data/stats.db"));
+        assert_eq!(cfg.dashboard.retention_days, 0);
+    }
+
+    #[test]
+    fn dashboard_rejects_empty_database_path() {
+        let text = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            [dashboard]
+            database_path = ""
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dashboard_rejects_retention_above_9999_days() {
+        let text = r#"
+            [server]
+            listen = "127.0.0.1:5300"
+            [dashboard]
+            retention_days = 10000
+            [[upstream]]
+            type = "plain"
+            addr = "1.1.1.1:53"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+
+        let error = cfg.validate().unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "dashboard retention_days must be between 0 and 9999"
+        );
     }
 
     #[test]

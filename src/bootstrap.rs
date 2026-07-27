@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{Name, RData, RecordType};
 use std::collections::BTreeSet;
@@ -27,7 +27,11 @@ impl Bootstrap {
                 UpstreamConfig::Dot { ip, domain } => {
                     let (host, port) = crate::config::split_domain_port(domain)?;
                     let tls = Arc::new(crate::tls::client_config(&[], &[], None)?);
-                    Arc::new(DotResolver::new(std::net::SocketAddr::new(*ip, port), &host, tls)?)
+                    Arc::new(DotResolver::new(
+                        std::net::SocketAddr::new(*ip, port),
+                        &host,
+                        tls,
+                    )?)
                 }
                 UpstreamConfig::Doh { url, ip, http3, .. } => {
                     // bootstrap 无 ECH（validate 已保证 ip 非空）；
@@ -38,7 +42,10 @@ impl Bootstrap {
             };
             resolvers.push(r);
         }
-        Ok(Self { resolvers, prefer_ipv6 })
+        Ok(Self {
+            resolvers,
+            prefer_ipv6,
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -107,10 +114,10 @@ impl Bootstrap {
             if let RData::HTTPS(https) = &record.data {
                 use hickory_proto::rr::rdata::svcb::{SvcParamKey, SvcParamValue};
                 for (key, value) in &https.0.svc_params {
-                    if matches!(key, SvcParamKey::EchConfigList) {
-                        if let SvcParamValue::EchConfigList(list) = value {
-                            return Ok(Some(list.0.clone()));
-                        }
+                    if matches!(key, SvcParamKey::EchConfigList)
+                        && let SvcParamValue::EchConfigList(list) = value
+                    {
+                        return Ok(Some(list.0.clone()));
                     }
                 }
             }
@@ -123,7 +130,7 @@ impl Bootstrap {
 mod tests {
     use super::*;
     use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
-    use hickory_proto::rr::rdata::svcb::{EchConfigList, SvcParamKey, SvcParamValue, SVCB};
+    use hickory_proto::rr::rdata::svcb::{EchConfigList, SVCB, SvcParamKey, SvcParamValue};
     use hickory_proto::rr::rdata::{A, AAAA, HTTPS};
     use hickory_proto::rr::{Name, RData, Record, RecordType};
     use std::net::{IpAddr, SocketAddr};
@@ -140,13 +147,16 @@ mod tests {
                 let (n, peer) = sock.recv_from(&mut buf).await.unwrap();
                 let query = Message::from_vec(&buf[..n]).unwrap();
                 let q = query.queries[0].clone();
-                let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+                let mut resp =
+                    Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
                 resp.metadata.response_code = ResponseCode::NoError;
                 resp.add_query(q.clone());
                 let name = q.name().clone();
                 let rdata = match q.query_type() {
                     RecordType::A => Some(RData::A(A::new(93, 184, 216, 34))),
-                    RecordType::AAAA => Some(RData::AAAA(AAAA::new(0x2606, 0x2800, 0, 0, 0, 0, 0, 1))),
+                    RecordType::AAAA => {
+                        Some(RData::AAAA(AAAA::new(0x2606, 0x2800, 0, 0, 0, 0, 0, 1)))
+                    }
                     RecordType::HTTPS => {
                         let svcb = SVCB::new(
                             1,
@@ -170,8 +180,11 @@ mod tests {
     }
 
     fn bootstrap_for(addr: SocketAddr, prefer_ipv6: bool) -> Bootstrap {
-        Bootstrap::from_config(&[crate::config::UpstreamConfig::Plain { addr }], prefer_ipv6)
-            .unwrap()
+        Bootstrap::from_config(
+            &[crate::config::UpstreamConfig::Plain { addr }],
+            prefer_ipv6,
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -190,7 +203,10 @@ mod tests {
         let b = bootstrap_for(addr, true);
         let ips = b.resolve_ips("dns.example").await.expect("ips");
         assert!(ips[0].is_ipv6(), "prefer_ipv6 puts IPv6 first for dialing");
-        assert!(ips.iter().any(|ip| ip.is_ipv4()), "v4 still present as fallback");
+        assert!(
+            ips.iter().any(|ip| ip.is_ipv4()),
+            "v4 still present as fallback"
+        );
     }
 
     #[tokio::test]

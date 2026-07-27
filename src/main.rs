@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use dnsbuffer::{build_pipeline, config, server};
+use dnsbuffer::{config, dashboard};
 
 #[derive(Parser, Debug)]
 #[command(name = "dnsbuffer", about = "A DNS proxy with DoH/ECH upstreams")]
@@ -27,7 +27,12 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let pipeline = build_pipeline(&cfg).await?;
-    tracing::warn!("dnsbuffer starting");
-    server::run_udp(cfg.server.listen, pipeline).await
+    dashboard::build_runtime(&cfg)
+        .await?
+        .run_until(async {
+            tokio::signal::ctrl_c()
+                .await
+                .context("failed to listen for shutdown signal")
+        })
+        .await
 }
