@@ -2,17 +2,18 @@ use anyhow::{Context, Result};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::CertificateDer;
 
-/// 构建上游 TLS 客户端配置：webpki 根证书 + 可选附加根（测试用自签）+
-/// ALPN + 可选 ECH（TLS 1.3）。
+/// Builds the upstream TLS client configuration: webpki root certificates +
+/// optional additional roots (self-signed for testing) + ALPN + optional ECH (TLS 1.3).
 ///
-/// provider 说明：本项目依赖树中 rustls 同时链接了 aws-lc-rs 与 ring 两个
-/// crypto provider（quinn 引入 ring），因此不能依赖 process-level 默认
-/// provider 的隐式解析——`ClientConfig::builder()` /
-/// `CryptoProvider::get_default_or_install_from_crate_features()` 在存在
-/// 多个候选 provider 且未安装进程级默认值时会 panic。这里对普通路径与 ECH
-/// 路径统一使用 `ClientConfig::builder_with_provider(aws_lc_rs::default_provider())`
-/// 显式指定 provider，避免歧义；ECH 所需的 HPKE 套件本来就只能来自
-/// aws-lc-rs provider。
+/// Provider note: in this project's dependency tree, rustls links both the
+/// aws-lc-rs and ring crypto providers (quinn pulls in ring), so we cannot rely
+/// on implicit resolution of the process-level default provider——`ClientConfig::builder()` /
+/// `CryptoProvider::get_default_or_install_from_crate_features()` will panic when
+/// multiple candidate providers exist and no process-level default has been
+/// installed. Here both the regular path and the ECH path uniformly use
+/// `ClientConfig::builder_with_provider(aws_lc_rs::default_provider())` to specify
+/// the provider explicitly and avoid ambiguity; the HPKE suites required by ECH
+/// can only come from the aws-lc-rs provider anyway.
 pub fn client_config(
     alpn: &[&[u8]],
     extra_roots: &[CertificateDer<'static>],

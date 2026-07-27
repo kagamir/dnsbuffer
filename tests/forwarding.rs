@@ -35,8 +35,8 @@ async fn spawn_mock_upstream() -> SocketAddr {
     addr
 }
 
-/// mock 上游：计数收到的查询数，并带一条 TTL 300 的 A 记录回复 NoError
-/// （缓存 TTL>0 逻辑依赖此记录）。
+/// Mock upstream: counts the queries it receives and replies NoError with a
+/// single TTL 300 A record (the cache's TTL>0 logic depends on this record).
 async fn spawn_counting_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
     let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = sock.local_addr().unwrap();
@@ -69,7 +69,7 @@ async fn spawn_counting_upstream() -> (SocketAddr, Arc<AtomicUsize>) {
     (addr, counter)
 }
 
-/// 取一个空闲 UDP 端口地址（绑定后立即释放，交给被测服务器重新绑定）。
+/// Grab a free UDP port address (bind, then release immediately so the server under test can rebind it).
 async fn free_udp_addr() -> SocketAddr {
     let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = probe.local_addr().unwrap();
@@ -77,7 +77,7 @@ async fn free_udp_addr() -> SocketAddr {
     addr
 }
 
-/// 向 `listen` 发一条查询并等待解码后的响应报文。
+/// Send a single query to `listen` and wait for the decoded response message.
 async fn udp_query(listen: SocketAddr, name: &str, rtype: RecordType) -> Message {
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     client.connect(listen).await.unwrap();
@@ -111,7 +111,7 @@ fn query(id: u16) -> Message {
 async fn proxy_forwards_to_upstream_and_replies() {
     let upstream = spawn_mock_upstream().await;
 
-    // 取一个空闲端口给代理监听
+    // Grab a free port for the proxy to listen on
     let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let listen = probe.local_addr().unwrap();
     drop(probe);
@@ -153,11 +153,11 @@ async fn proxy_forwards_to_upstream_and_replies() {
 
 #[tokio::test]
 async fn group_failover_and_fallback_serve() {
-    // 主上游组：一个死端口 + 后备：活 mock → 查询仍应成功
+    // Primary upstream group: one dead port + fallback: a live mock -> the query should still succeed
     let alive = spawn_mock_upstream().await;
     let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let dead = probe.local_addr().unwrap();
-    drop(probe); // 无人监听 → ECONNREFUSED/超时
+    drop(probe); // nobody listening -> ECONNREFUSED/timeout
 
     let probe2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let listen = probe2.local_addr().unwrap();
@@ -229,7 +229,7 @@ async fn hosts_entry_served_locally() {
 
     let resp = udp_query(listen, "printer.home.", RecordType::A).await;
     assert_eq!(resp.answers.len(), 1);
-    assert_eq!(upstream.1.load(Ordering::SeqCst), 0, "hosts 命中不得走上游");
+    assert_eq!(upstream.1.load(Ordering::SeqCst), 0, "a hosts hit must not reach the upstream");
 }
 
 #[tokio::test]
@@ -294,5 +294,5 @@ async fn cache_serves_second_query() {
     let _ = udp_query(listen, "cached.example.", RecordType::A).await;
     let resp2 = udp_query(listen, "cached.example.", RecordType::A).await;
     assert_eq!(resp2.metadata.response_code, ResponseCode::NoError);
-    assert_eq!(upstream.1.load(Ordering::SeqCst), 1, "第二次必须走缓存");
+    assert_eq!(upstream.1.load(Ordering::SeqCst), 1, "the second query must be served from cache");
 }

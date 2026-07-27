@@ -5,21 +5,21 @@ use crate::cache::Cache;
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct CacheSample {
-    /// 观测时刻的缓存条目数。
+    /// Number of cache entries at the moment of observation.
     pub size: u64,
-    /// 自进程启动以来的累计命中率（无查询时为 0）。
+    /// Cumulative hit rate since process start (0 when there are no queries).
     pub hit_rate: f64,
-    /// 观测时刻的累计缓存查询次数。
+    /// Cumulative number of cache lookups at the moment of observation.
     #[serde(skip)]
     pub lookups: u64,
 }
 
-/// 命中率-缓存大小观测：每处理一个经过缓存的请求就把
-/// (当前缓存条数, 累计命中率) 记为一个点，点按容量升序连成线即为观测曲线。
-/// 例如启动时描点 (0, 0)；第 1 条请求未命中后缓存 1 条，描点 (1, 0)；
-/// 累计 10 次查询命中 1 次且缓存 10 条时，描点 (10, 0.1)。
-/// 同一容量只保留最新累计值，因此内存以 max_entries 为上界；
-/// 数据在内存中，与缓存同生命周期。
+/// Hit rate vs. cache size observations: each time a cached request is handled,
+/// record (current cache entry count, cumulative hit rate) as a point; connecting the points in ascending order of capacity yields the observation curve.
+/// For example, plot (0, 0) at startup; after the 1st request misses and the cache holds 1 entry, plot (1, 0);
+/// once 10 cumulative queries have hit once and the cache holds 10 entries, plot (10, 0.1).
+/// Only the latest cumulative value is kept per capacity, so memory is bounded by max_entries;
+/// the data lives in memory and shares the cache's lifetime.
 pub struct CacheHitSampler {
     cache: Arc<Cache>,
     state: Mutex<SamplerState>,
@@ -37,7 +37,7 @@ impl CacheHitSampler {
             cache,
             state: Mutex::new(SamplerState::default()),
         };
-        sampler.observe(); // 初始观测点，通常为 (0, 0)
+        sampler.observe(); // Initial observation point, usually (0, 0)
         sampler
     }
 
@@ -45,7 +45,7 @@ impl CacheHitSampler {
         self.cache.len()
     }
 
-    /// 记录一个观测点；缓存条数与累计查询数都没变化则不重复描点。
+    /// Record an observation point; skip if neither the cache entry count nor the cumulative lookup count has changed.
     pub fn observe(&self) {
         let (lookups, hits) = self.cache.hit_stats();
         let size = self.cache.len() as u64;
@@ -72,12 +72,12 @@ impl CacheHitSampler {
         state.by_size.insert(size, sample);
     }
 
-    /// 最近一次观测点。
+    /// The most recent observation point.
     pub fn latest(&self) -> Option<CacheSample> {
         self.state.lock().ok().and_then(|state| state.latest)
     }
 
-    /// 按缓存容量升序输出观测点；同一容量取最新观测（累计口径下新值覆盖旧值）。
+    /// Output observation points in ascending order of cache capacity; for the same capacity, take the latest observation (under the cumulative measure the newer value overwrites the older one).
     pub fn points(&self) -> Vec<CacheSample> {
         self.state
             .lock()
@@ -127,24 +127,24 @@ mod tests {
         assert_eq!(
             (initial.size, initial.hit_rate),
             (0, 0.0),
-            "初始描点 (0, 0)"
+            "initial point (0, 0)"
         );
 
-        cache.get(&key("a.com."), 1); // 请求 1：未命中
+        cache.get(&key("a.com."), 1); // Request 1: miss
         cache.put(key("a.com."), response("a.com."));
         sampler.observe();
         let first = sampler.latest().unwrap();
         assert_eq!(
             (first.size, first.hit_rate),
             (1, 0.0),
-            "1 条缓存、累计命中率 0"
+            "1 cached entry, cumulative hit rate 0"
         );
 
-        cache.get(&key("a.com."), 2); // 请求 2：命中
+        cache.get(&key("a.com."), 2); // Request 2: hit
         sampler.observe();
         let second = sampler.latest().unwrap();
         assert_eq!(second.size, 1);
-        assert_eq!(second.hit_rate, 0.5, "累计 2 次查询命中 1 次");
+        assert_eq!(second.hit_rate, 0.5, "1 hit out of 2 cumulative queries");
         assert_eq!(second.lookups, 2);
     }
 
@@ -155,7 +155,7 @@ mod tests {
 
         sampler.observe();
         sampler.observe();
-        assert_eq!(sampler.points().len(), 1, "无变化时不重复描点");
+        assert_eq!(sampler.points().len(), 1, "no duplicate points when nothing changes");
     }
 
     #[test]
@@ -163,14 +163,14 @@ mod tests {
         let cache = Arc::new(Cache::new(10));
         let sampler = CacheHitSampler::new(cache.clone());
 
-        cache.get(&key("a.com."), 1); // 请求 1：未命中，累计 0/1
+        cache.get(&key("a.com."), 1); // Request 1: miss, cumulative 0/1
         cache.put(key("a.com."), response("a.com."));
         sampler.observe(); // (1, 0.0)
-        cache.get(&key("a.com."), 2); // 请求 2：命中，累计 1/2
-        sampler.observe(); // (1, 0.5) 覆盖同容量旧点
-        cache.get(&key("b.com."), 3); // 请求 3：未命中，累计 1/3
+        cache.get(&key("a.com."), 2); // Request 2: hit, cumulative 1/2
+        sampler.observe(); // (1, 0.5) overwrites the older point at the same capacity
+        cache.get(&key("b.com."), 3); // Request 3: miss, cumulative 1/3
         cache.put(key("b.com."), response("b.com."));
-        cache.get(&key("b.com."), 4); // 请求 4：命中，累计 2/4
+        cache.get(&key("b.com."), 4); // Request 4: hit, cumulative 2/4
         sampler.observe(); // (2, 0.5)
 
         let points = sampler.points();
@@ -179,12 +179,12 @@ mod tests {
         assert_eq!(
             (points[1].size, points[1].hit_rate),
             (1, 0.5),
-            "同容量取最新累计值"
+            "take the latest cumulative value for the same capacity"
         );
         assert_eq!((points[2].size, points[2].hit_rate), (2, 0.5));
         assert!(
             points.windows(2).all(|pair| pair[0].size < pair[1].size),
-            "观测点必须按容量升序"
+            "observation points must be in ascending order of capacity"
         );
     }
 }

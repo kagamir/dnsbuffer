@@ -386,9 +386,9 @@ impl TryFrom<QueryRecord> for QueryRecordDto {
 struct CacheCurveDto {
     max_entries: u64,
     current_entries: u64,
-    /// 最近一次观测点；尚无观测时为 null。
+    /// The most recent observation point; null when there are no observations yet.
     current: Option<super::sampler::CacheSample>,
-    /// 按缓存容量升序的观测点，直接连线即为命中率-缓存大小曲线。
+    /// Observation points in ascending order of cache capacity; connecting them directly yields the hit rate vs. cache size curve.
     points: Vec<super::sampler::CacheSample>,
 }
 

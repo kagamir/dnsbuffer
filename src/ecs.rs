@@ -4,14 +4,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::config::EcsConfig;
 
-/// ECS 子网：地址已按前缀掩码归零。
+/// ECS subnet: the address has already been zeroed out according to the prefix mask.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EcsSubnet {
     pub addr: IpAddr,
     pub prefix: u8,
 }
 
-/// 把 IP 掩码到指定前缀（调用方保证前缀不超过地址族位宽）。
+/// Masks an IP to the given prefix (the caller guarantees the prefix does not exceed the address family's bit width).
 pub fn mask_ip(ip: IpAddr, prefix: u8) -> EcsSubnet {
     match ip {
         IpAddr::V4(v4) => {
@@ -41,7 +41,7 @@ pub fn mask_ip(ip: IpAddr, prefix: u8) -> EcsSubnet {
     }
 }
 
-/// 解析 `"1.2.3.0/24"` 形式的子网；前缀超界或格式非法 bail。
+/// Parses a subnet in the `"1.2.3.0/24"` form; bails if the prefix is out of range or the format is invalid.
 pub fn parse_subnet(s: &str) -> Result<EcsSubnet> {
     let (addr, prefix) = s
         .split_once('/')
@@ -59,7 +59,7 @@ pub fn parse_subnet(s: &str) -> Result<EcsSubnet> {
     Ok(mask_ip(addr, prefix))
 }
 
-/// 配置了 `fixed_subnet` 则解析使用，否则不注入 ECS；解析失败 warn 并禁用。
+/// If `fixed_subnet` is configured, it is parsed and used; otherwise no ECS is injected; on parse failure, warns and disables it.
 pub fn subnet_from_config(cfg: &EcsConfig) -> Option<EcsSubnet> {
     let s = cfg.fixed_subnet.as_deref()?;
     match parse_subnet(s) {
@@ -71,7 +71,7 @@ pub fn subnet_from_config(cfg: &EcsConfig) -> Option<EcsSubnet> {
     }
 }
 
-/// 注入 ECS：已有 EDNS 则追加 option，否则创建。scope_prefix=0。
+/// Injects ECS: appends the option if EDNS already exists, otherwise creates it. scope_prefix=0.
 pub fn inject(query: &mut Message, subnet: &EcsSubnet) {
     use hickory_proto::op::Edns;
     use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
@@ -142,7 +142,7 @@ mod tests {
         m.add_query(q);
         let subnet = parse_subnet("203.0.113.0/24").unwrap();
         inject(&mut m, &subnet);
-        // 往返编解码后 ECS 选项仍在（证明 wire 层真实生效）
+        // The ECS option is still present after round-trip encode/decode (proving it truly takes effect at the wire level)
         let bytes = m.to_vec().unwrap();
         let decoded = hickory_proto::op::Message::from_vec(&bytes).unwrap();
         let edns = decoded.edns.as_ref().expect("edns present");

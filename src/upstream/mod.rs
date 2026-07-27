@@ -8,8 +8,9 @@ pub mod selector;
 
 use std::net::IpAddr;
 
-/// 连接尝试次序整理：偏好的地址族在前（稳定排序，同族保持原有顺序）。
-/// `prefer_ipv6 = false`（默认）时 IPv4 优先。
+/// Orders the connection-attempt sequence: the preferred address family comes first
+/// (stable sort, keeping the original order within each family).
+/// When `prefer_ipv6 = false` (the default), IPv4 takes priority.
 pub fn sort_by_family(ips: &mut [IpAddr], prefer_ipv6: bool) {
     ips.sort_by_key(|ip| ip.is_ipv6() != prefer_ipv6);
 }

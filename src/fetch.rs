@@ -13,7 +13,7 @@ use crate::bootstrap::Bootstrap;
 const MAX_BODY: usize = 20 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
-/// 拉取规则文件：支持 http/https，域名经 bootstrap 解析，≤3 次跳转，20MiB 上限。
+/// Fetches a rule file: supports http/https, resolves the domain via bootstrap, ≤3 redirects, 20MiB limit.
 pub async fn fetch_url(url: &str, bootstrap: &Bootstrap) -> Result<Vec<u8>> {
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
@@ -101,7 +101,7 @@ pub async fn fetch_url(url: &str, bootstrap: &Bootstrap) -> Result<Vec<u8>> {
             current = if loc.starts_with("http://") || loc.starts_with("https://") {
                 loc.to_string()
             } else {
-                // 相对跳转：同 scheme/host/port
+                // Relative redirect: same scheme/host/port
                 let scheme = if https { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}{loc}")
             };
@@ -135,7 +135,7 @@ pub(crate) mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// 极简 HTTP/1.1 明文 server：按路径返回 200 内容 / 302 跳转 / 404。
+    /// Minimal HTTP/1.1 plaintext server: returns 200 content / 302 redirect / 404 based on the path.
     pub(crate) async fn spawn_http_server(body: &'static str) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

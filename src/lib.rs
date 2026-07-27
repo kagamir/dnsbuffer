@@ -31,14 +31,14 @@ pub struct BuiltPipeline {
     pub cache_sampler: Arc<crate::dashboard::sampler::CacheHitSampler>,
 }
 
-/// 依据配置构建解析链，并使用调用方拥有的 recorder 记录查询。
+/// Builds the resolution chain from the config, and records queries using the caller-owned recorder.
 pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<BuiltPipeline> {
     let bootstrap = Arc::new(Bootstrap::from_config(
         &config.bootstrap.servers,
         config.server.prefer_ipv6,
     )?);
 
-    // 广告屏蔽：初次加载 + 定时热替换
+    // Ad blocking: initial load + periodic hot swap
     let filter = Arc::new(crate::filter::Filter::new(&config.adblock.allowlist));
     if !config.adblock.rule_sources.is_empty() {
         let rules = crate::filter::load_sources(&config.adblock.rule_sources, &bootstrap).await;
@@ -62,7 +62,7 @@ pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<Built
         "primary",
     )
     .await?;
-    // 对冲式重试：主上游尝试超过 hedged_retry_ms 未返回即并行再发，0 禁用
+    // Hedged retry: if the primary upstream does not return within hedged_retry_ms, send a parallel retry; 0 disables it
     if config.server.hedged_retry_ms > 0 {
         primary = Arc::new(crate::upstream::hedged::HedgedResolver::new(
             primary,

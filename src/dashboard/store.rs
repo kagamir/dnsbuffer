@@ -290,9 +290,9 @@ pub struct Ranking {
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct ResponseTimeSummary {
-    /// 参与统计的查询条数（保留窗口内的全部明细）。
+    /// Number of queries included in the statistics (all detail rows within the retention window).
     pub samples: i64,
-    /// duration_ms 的平均值；无记录时为 null。
+    /// Average of duration_ms; null when there are no records.
     pub avg_ms: Option<f64>,
 }
 
@@ -701,9 +701,10 @@ impl Store {
         self.response_time_with_deadline(Some(deadline))
     }
 
-    /// 平均响应耗时：duration_ms 记录的是请求进入 pipeline 到生成应答的
-    /// 全程耗时，这里对保留窗口内的全部明细求平均。不做预聚合，
-    /// 由前端手动刷新时按需计算。
+    /// Average response time: duration_ms records the full time from a request
+    /// entering the pipeline to generating a response; here we average over all
+    /// detail rows within the retention window. No pre-aggregation is done; it is
+    /// computed on demand when the frontend refreshes manually.
     fn response_time_with_deadline(&self, deadline: Option<Instant>) -> Result<ResponseTimeSummary> {
         let conn = self.read_connection(deadline)?;
         Ok(conn.query_row(
@@ -1054,7 +1055,7 @@ mod tests {
         let (_guard, store) = test_store("response-time");
         let empty = store.response_time().unwrap();
         assert_eq!(empty.samples, 0);
-        assert!(empty.avg_ms.is_none(), "无记录时平均值为 null");
+        assert!(empty.avg_ms.is_none(), "average is null when there are no records");
 
         let mut fast = event(1_753_488_000_000, "fast.example", &[]);
         fast.duration_ms = 10;

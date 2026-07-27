@@ -9,7 +9,7 @@ use crate::resolver::Resolver;
 use crate::stats::UpstreamStats;
 use crate::upstream::selector::pick_weighted;
 
-/// 一次查询在组内最多尝试的成员数。
+/// Maximum number of members a single query will try within the group.
 const MAX_ATTEMPTS: usize = 2;
 
 struct Member {
@@ -18,7 +18,7 @@ struct Member {
     stats: Arc<Mutex<UpstreamStats>>,
 }
 
-/// 上游组：滑动窗口统计驱动加权随机选择，失败重选，统计反馈。
+/// Upstream group: sliding-window statistics drive weighted random selection, reselect on failure, with statistics feedback.
 pub struct UpstreamGroup {
     members: Vec<Member>,
     k: f64,
@@ -81,7 +81,7 @@ impl Resolver for UpstreamGroup {
             let Some(idx) = pick_weighted(&weights, rand::random::<f64>()) else {
                 break;
             };
-            // 全零权重时 pick_weighted 均匀退化可能落在已试成员上；跳过
+            // With all-zero weights, pick_weighted's uniform degradation may land on an already-tried member; skip it
             if tried.contains(&idx) {
                 if let Some(untried) = (0..self.members.len()).find(|i| !tried.contains(i)) {
                     tried.push(untried);
@@ -124,11 +124,11 @@ async fn try_member(m: &Member, query: &Message) -> Result<Message> {
     }
 }
 
-/// 主上游组全部失败时切换到后备组。
+/// Switches to the fallback group when the primary upstream group fails entirely.
 pub struct FallbackResolver {
     primary: Arc<dyn Resolver>,
     fallback: Arc<dyn Resolver>,
-    /// 主上游阶段预算：失败或超时即切换 fallback。
+    /// Primary-upstream phase budget: switch to fallback on failure or timeout.
     primary_timeout: std::time::Duration,
 }
 
@@ -326,7 +326,7 @@ mod tests {
             &mut metrics,
             "primary",
         );
-        // 多次调用：每次都应最终成功（坏成员失败后重选好成员）
+        // Multiple calls: each should ultimately succeed (after the bad member fails, the good member is reselected)
         for _ in 0..10 {
             let resp = group
                 .resolve(&sample_query())
@@ -361,7 +361,7 @@ mod tests {
         }
         let bad_hits = bad.0.load(Ordering::SeqCst);
         let ok_hits = ok.0.load(Ordering::SeqCst);
-        // 权重衰减后坏成员被选中的次数应显著低于好成员
+        // After weight decay, the bad member should be chosen far less often than the good member
         assert!(
             ok_hits > bad_hits,
             "ok {ok_hits} should exceed bad {bad_hits}"
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }
 
-    /// 挂起不返回的解析器：模拟上游无响应（黑洞）。
+    /// A resolver that hangs without returning: simulates an unresponsive upstream (black hole).
     struct Hang;
     #[async_trait]
     impl Resolver for Hang {
@@ -442,7 +442,7 @@ mod tests {
             &mut metrics,
             "fallback",
         ));
-        // 主上游黑洞：必须在 upstream_timeout(200ms) 到点后切到 fallback，而不是干等
+        // Primary upstream black hole: must switch to fallback once upstream_timeout(200ms) elapses, rather than waiting indefinitely
         let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_millis(200));
         let start = std::time::Instant::now();
         let resp = chain

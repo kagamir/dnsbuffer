@@ -12,13 +12,13 @@ pub struct StatsSnapshot {
     pub avg_latency_ms: Option<f64>,
 }
 
-/// 单个上游的调用统计。
-/// 滑动窗口（近 N 次）驱动加权随机选择；
-/// 按小时分桶的长期历史（保留 retention_days）驱动面板快照。
+/// Call statistics for a single upstream.
+/// A sliding window (the most recent N calls) drives weighted random selection;
+/// long-term history bucketed by hour (kept for retention_days) drives the dashboard snapshot.
 pub struct UpstreamStats {
     window: usize,
     samples: VecDeque<Sample>,
-    /// None 表示永久保留（retention_days = 0）。
+    /// None means keep forever (retention_days = 0).
     retention_ms: Option<i64>,
     history: VecDeque<HourBucket>,
 }
@@ -42,7 +42,7 @@ impl UpstreamStats {
         Self::with_retention(window, 0)
     }
 
-    /// `retention_days = 0` 表示历史永久保留。
+    /// `retention_days = 0` means history is kept forever.
     pub fn with_retention(window: usize, retention_days: u64) -> Self {
         Self {
             window: window.max(1),
@@ -64,7 +64,7 @@ impl UpstreamStats {
 
     fn record_history(&mut self, now_ms: i64, success_latency_ms: Option<f64>) {
         let hour_ms = now_ms.div_euclid(HOUR_MS).saturating_mul(HOUR_MS);
-        // 时钟回拨时并入最新桶，保证桶序单调
+        // On a clock rollback, merge into the latest bucket to keep the bucket order monotonic
         match self.history.back_mut() {
             Some(bucket) if bucket.hour_ms >= hour_ms => {
                 bucket.samples += 1;
@@ -136,13 +136,13 @@ impl UpstreamStats {
                 Sample::Failure => (sum, n),
             });
         if n == 0 {
-            100.0 // 冷启动中值
+            100.0 // cold-start median
         } else {
             sum / n as f64
         }
     }
 
-    /// 面板快照：基于 retention_days 内的长期历史，而非选择器滑动窗口。
+    /// Dashboard snapshot: based on the long-term history within retention_days, not the selector's sliding window.
     pub fn snapshot(&self) -> StatsSnapshot {
         self.snapshot_at(unix_millis())
     }
@@ -177,7 +177,7 @@ impl UpstreamStats {
         }
     }
 
-    /// w = 1 / ((t_avg_ms + ε) × (1 + k·f))，ε=1.0；k 负值按 0 处理
+    /// w = 1 / ((t_avg_ms + ε) × (1 + k·f)), ε=1.0; a negative k is treated as 0
     pub fn weight(&self, k: f64) -> f64 {
         let k = k.max(0.0);
         1.0 / ((self.avg_latency_ms() + 1.0) * (1.0 + k * self.failure_rate()))
@@ -268,7 +268,7 @@ mod tests {
         for _ in 0..10 {
             s.record_success(Duration::from_millis(10));
         }
-        // 选择器窗口只留 4 条，但面板样本数覆盖全部历史
+        // the selector window keeps only 4 entries, but the dashboard sample count covers the full history
         assert_eq!(s.snapshot().samples, 10);
         assert_eq!(s.snapshot().successes, 10);
     }
@@ -283,13 +283,13 @@ mod tests {
         s.record_success_at(Duration::from_millis(10), now);
 
         let snap = s.snapshot_at(now);
-        assert_eq!(snap.samples, 2, "8 天前的样本应被剔除");
+        assert_eq!(snap.samples, 2, "the sample from 8 days ago should be pruned");
         assert_eq!(snap.successes, 2);
         assert_eq!(snap.failure_rate, 0.0);
         assert_eq!(snap.avg_latency_ms, Some(20.0));
 
         let later = s.snapshot_at(now + 8 * DAY_MS);
-        assert_eq!(later.samples, 0, "超过保留期后样本归零");
+        assert_eq!(later.samples, 0, "samples drop to zero once past the retention period");
         assert_eq!(later.failure_rate, 0.0);
         assert_eq!(later.avg_latency_ms, None);
     }

@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 
 use crate::pipeline::Pipeline;
 
-/// 监听 UDP 并服务 DNS 查询，直到进程退出。
+/// Listens on UDP and serves DNS queries until the process exits.
 pub async fn run_udp(listen: SocketAddr, pipeline: Arc<Pipeline>) -> Result<()> {
     let socket = Arc::new(
         UdpSocket::bind(listen)

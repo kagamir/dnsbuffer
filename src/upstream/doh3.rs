@@ -6,20 +6,20 @@ use tokio::sync::Mutex;
 
 type H3Sender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 
-/// QUIC 保活间隔：防止 NAT 映射过期把放置的连接悄悄弄死。
+/// QUIC keep-alive interval: prevents NAT mapping expiry from silently killing an idle connection.
 const KEEP_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-/// QUIC 空闲超时：超时后连接明确进入关闭态，复用前可检出并立即重建。
+/// QUIC idle timeout: after it expires the connection clearly enters the closed state, so it can be detected before reuse and rebuilt immediately.
 const MAX_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 struct H3State {
     generation: u64,
-    /// 保留 quinn 连接句柄，复用前用 close_reason() 检查死活。
+    /// Keeps the quinn connection handle so close_reason() can check liveness before reuse.
     conn: quinn::Connection,
     sender: H3Sender,
 }
 
-/// 惰性建立并复用的 HTTP/3 (QUIC) 连接。复用前检查连接死活（死则重建），
-/// 发送失败重连再试一次；仍失败由上层（组内重选/对冲/fallback）兜底。
+/// A lazily established and reused HTTP/3 (QUIC) connection. Checks liveness before reuse (rebuilds if dead),
+/// reconnects and retries once on a send failure; if it still fails, the upper layer (in-group reselection / hedging / fallback) handles it.
 pub struct H3Conn {
     host: String,
     port: u16,
@@ -50,8 +50,8 @@ impl H3Conn {
                 .context("QUIC idle timeout out of range")?,
         ));
         client_config.transport_config(Arc::new(transport));
-        // 列表含任意 v6 就绑 [::]（quinn 会把 v4 目标映射为 v6-mapped 一并可达）；
-        // 纯 v4 或本机无 v6 栈时退回 0.0.0.0（此时 v6 目标逐个失败，由重选/fallback 兜底）。
+        // If the list contains any v6, bind [::] (quinn maps v4 targets to v6-mapped so both are reachable);
+        // for pure v4, or when the host has no v6 stack, fall back to 0.0.0.0 (v6 targets then fail one by one, handled by reselection/fallback).
         let v4_bind: SocketAddr = "0.0.0.0:0".parse().expect("static addr");
         let mut endpoint = if ips.iter().any(|ip| ip.is_ipv6()) {
             quinn::Endpoint::client("[::]:0".parse().expect("static addr")).or_else(|e| {
@@ -112,7 +112,7 @@ impl H3Conn {
             .await
             .context("h3 client setup")?;
         tokio::spawn(async move {
-            // 驱动连接直到关闭
+            // Drive the connection until it closes
             let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
         });
         Ok((handle, sender))
@@ -120,10 +120,10 @@ impl H3Conn {
 
     pub async fn request(&self, uri: &str, body: Vec<u8>) -> Result<Vec<u8>> {
         for attempt in 0..2 {
-            // 锁内只做检活/取用/建连并克隆 sender；请求发送在锁外，保住 H3 多路复用
+            // Inside the lock only check liveness / fetch / establish the connection and clone the sender; the request is sent outside the lock to preserve H3 multiplexing
             let (mut sender, generation) = {
                 let mut guard = self.state.lock().await;
-                // 已死连接（idle 超时/对端关闭）直接丢弃，避免拿着它死等
+                // Discard an already-dead connection (idle timeout / peer closed) so we don't hold it and wait forever
                 if guard
                     .as_ref()
                     .is_some_and(|s| s.conn.close_reason().is_some())
@@ -209,8 +209,8 @@ pub(crate) mod tests {
         spawn_mock_h3_server_with_cap(bind, usize::MAX).await
     }
 
-    /// 每个连接最多服务 `max_requests_per_conn` 个请求后服务端主动关连接
-    /// （模拟放置后连接被断），可继续接受新连接。
+    /// After serving at most `max_requests_per_conn` requests per connection, the server actively closes it
+    /// (simulating a connection being dropped after being idle), and can keep accepting new connections.
     pub(crate) async fn spawn_mock_h3_server_with_cap(
         bind: &str,
         max_requests_per_conn: usize,
@@ -277,8 +277,8 @@ pub(crate) mod tests {
                         stream.finish().await.unwrap();
                         served += 1;
                     }
-                    // 等最后一个响应送达，避免 CONNECTION_CLOSE 竞争掉在途数据；
-                    // 随后退出作用域即关闭该连接
+                    // Wait for the last response to be delivered so CONNECTION_CLOSE doesn't race away in-flight data;
+                    // then leaving scope closes the connection
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 });
             }
@@ -339,8 +339,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn h3_mixed_family_ips_reach_ipv6_server() {
-        // 服务器只在 [::1] 上监听；ips 混合 v6+v4。
-        // endpoint 必须绑 [::]（而非 0.0.0.0），否则拨 v6 直接 InvalidRemoteAddress。
+        // The server listens only on [::1]; ips mix v6+v4.
+        // The endpoint must bind [::] (not 0.0.0.0), otherwise dialing v6 fails outright with InvalidRemoteAddress.
         let (addr, root) = spawn_mock_h3_server_at("[::1]:0").await;
         let tls = crate::tls::client_config(&[b"h3"], &[root], None).unwrap();
         let conn = H3Conn::new(
@@ -361,8 +361,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn h3_reconnects_when_server_closed_idle_connection() {
-        // 服务端每个连接只服务 1 个请求就关闭——模拟长时间放置后连接已死。
-        // 第二个请求必须检出死连接并立即重建，而不是拿着死 sender 报错/死等。
+        // The server serves only 1 request per connection then closes it -- simulating a connection that has died after being idle a long time.
+        // The second request must detect the dead connection and rebuild immediately, rather than erroring / hanging on a dead sender.
         let (addr, root) = spawn_mock_h3_server_with_cap("127.0.0.1:0", 1).await;
         let tls = crate::tls::client_config(&[b"h3"], &[root], None).unwrap();
         let conn = H3Conn::new("localhost".into(), addr.port(), vec![addr.ip()], tls).unwrap();
@@ -370,7 +370,7 @@ pub(crate) mod tests {
         conn.request(&uri, sample_query().to_vec().unwrap())
             .await
             .expect("first request on fresh connection");
-        // 留出时间让服务端的 CONNECTION_CLOSE 抵达客户端
+        // Allow time for the server's CONNECTION_CLOSE to reach the client
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let body = conn
             .request(&uri, sample_query().to_vec().unwrap())

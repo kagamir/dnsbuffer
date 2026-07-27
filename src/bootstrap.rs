@@ -10,11 +10,11 @@ use crate::config::UpstreamConfig;
 use crate::resolver::Resolver;
 use crate::upstream::{doh::DohResolver, dot::DotResolver, plain::PlainResolver};
 
-/// Bootstrap 解析器组：为上游 DoH 域名解析 IP、为 ECH 拉取 HTTPS 记录。
-/// 非 IP 形态的 bootstrap 服务器必须自带显式 ips（config.validate 已保证）。
+/// Bootstrap resolver group: resolves IPs for upstream DoH domains and fetches HTTPS records for ECH.
+/// Non-IP bootstrap servers must carry explicit `ips` themselves (guaranteed by config.validate).
 pub struct Bootstrap {
     resolvers: Vec<Arc<dyn Resolver>>,
-    /// 解析出的 IP 列表按此偏好排序（false = IPv4 优先，默认）。
+    /// The resolved IP list is sorted by this preference (false = IPv4 first, the default).
     prefer_ipv6: bool,
 }
 
@@ -34,8 +34,8 @@ impl Bootstrap {
                     )?)
                 }
                 UpstreamConfig::Doh { url, ip, http3, .. } => {
-                    // bootstrap 无 ECH（validate 已保证 ip 非空）；
-                    // 默认 H2，配置显式 http3 = true 才启用 H3
+                    // bootstrap has no ECH (validate guarantees ip is non-empty);
+                    // defaults to H2, H3 is only enabled when the config explicitly sets http3 = true
                     let ips: Vec<IpAddr> = ip.iter().copied().collect();
                     Arc::new(DohResolver::new(url, ips, None, *http3, prefer_ipv6)?)
                 }
@@ -102,7 +102,7 @@ impl Bootstrap {
         if ips.is_empty() {
             bail!("bootstrap could not resolve any ip for {domain}");
         }
-        // 按配置的地址族偏好排序供拨号使用（BTreeSet 序固定 v4 < v6，不可直接依赖）
+        // Sort by the configured address-family preference for dialing (BTreeSet order is fixed at v4 < v6, so it can't be relied on directly)
         let mut ips: Vec<IpAddr> = ips.into_iter().collect();
         crate::upstream::sort_by_family(&mut ips, self.prefer_ipv6);
         Ok(ips)
@@ -137,7 +137,7 @@ mod tests {
     use std::str::FromStr;
     use tokio::net::UdpSocket;
 
-    /// mock 上游：按 qtype 回 A/AAAA/HTTPS（带 ech 参数）记录。
+    /// Mock upstream: returns A/AAAA/HTTPS (with ech parameter) records based on qtype.
     async fn spawn_mock_bootstrap_upstream(ech_bytes: Vec<u8>) -> SocketAddr {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();

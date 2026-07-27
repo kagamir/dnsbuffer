@@ -6,10 +6,10 @@ use std::net::IpAddr;
 
 const HOSTS_TTL: u32 = 300;
 
-/// 自定义 hosts：精确名 + `*.` 通配后缀，直接构造应答。
+/// Custom hosts: exact names + `*.` wildcard suffixes, building responses directly.
 pub struct HostsMap {
     exact: HashMap<String, Vec<IpAddr>>,
-    wildcard: HashMap<String, Vec<IpAddr>>, // key 为去掉 "*." 的基域
+    wildcard: HashMap<String, Vec<IpAddr>>, // key is the base domain with "*." stripped off
 }
 
 fn normalize(name: &str) -> String {
@@ -39,7 +39,7 @@ impl HostsMap {
         if let Some(v) = self.exact.get(name) {
             return Some(v);
         }
-        // 通配：逐级剥离最左标签，剩余部分匹配基域（不匹配基域本身）
+        // Wildcard: strip the leftmost label level by level, matching the remainder against the base domain (does not match the base domain itself)
         let mut rest = name;
         while let Some(pos) = rest.find('.') {
             rest = &rest[pos + 1..];
@@ -89,7 +89,7 @@ impl HostsMap {
                     }
                 }
             }
-            _ => {} // 命中名但非地址类查询 → NODATA
+            _ => {} // name matched but not an address-type query → NODATA
         }
         Some(resp)
     }
@@ -153,7 +153,7 @@ mod tests {
         );
         assert!(
             h.lookup(&query("lab.example.", RecordType::A)).is_none(),
-            "wildcard 不匹配基域"
+            "wildcard does not match the base domain"
         );
     }
 

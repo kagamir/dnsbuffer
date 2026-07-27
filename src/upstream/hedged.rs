@@ -7,10 +7,10 @@ use tokio::time::Instant;
 
 use crate::resolver::Resolver;
 
-/// 对冲式快速重试：一次尝试超过 interval 未返回，就并行发起新尝试
-/// （每次尝试重新走内层的加权选择，大概率换成员）；任一成功即胜出。
-/// 全部在飞尝试都失败时立即报错（失败不是慢，交给上层 fallback）；
-/// 超过 max_wait 预算仍无结果则放弃。解析结束时取消其余在途尝试。
+/// Hedged fast retry: if an attempt does not return within `interval`, a new attempt is launched in parallel
+/// (each attempt re-runs the inner weighted selection, very likely picking a different member); whichever succeeds first wins.
+/// If all in-flight attempts fail, it errors immediately (a failure is not slowness, so hand it to the upper-level fallback);
+/// if there is still no result after the max_wait budget, it gives up. Any remaining in-flight attempts are cancelled when resolution ends.
 pub struct HedgedResolver {
     inner: Arc<dyn Resolver>,
     interval: Duration,
@@ -170,7 +170,7 @@ mod tests {
         .expect("count reached expected minimum");
     }
 
-    /// 第一次调用挂 60s，后续调用立即成功——模拟「首连丢包，重试才通」。
+    /// The first call hangs for 60s, later calls succeed immediately -- simulating "the first connection drops packets, only a retry gets through".
     struct SlowThenFast(AtomicUsize);
     #[async_trait]
     impl Resolver for SlowThenFast {

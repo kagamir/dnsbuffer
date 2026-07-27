@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// 缓存键：规范化域名（小写、无尾点）+ qtype 数值。
+/// Cache key: normalized domain name (lowercase, no trailing dot) + numeric qtype.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub name: String,
@@ -26,8 +26,8 @@ struct CacheEntry {
     expires_at: Instant,
 }
 
-/// 纯内存 LRU 乐观缓存：命中即返回（过期也返回并标记）；
-/// 读取把条目刷新到队尾（最近使用）；put 删旧插队尾；超限逐出最久未用。
+/// Pure in-memory LRU optimistic cache: return on hit (expired entries are returned and flagged too);
+/// a read moves the entry to the tail (most recently used); put removes the old entry and inserts at the tail; over the limit, evict the least recently used.
 pub struct Cache {
     map: Mutex<LinkedHashMap<CacheKey, CacheEntry>>,
     max_entries: usize,
@@ -36,7 +36,7 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// `max_entries` 会被夹紧到 ≥1（0 会导致缓存永远不可能命中）。
+    /// `max_entries` is clamped to ≥1 (0 would make the cache never able to hit).
     pub fn new(max_entries: usize) -> Self {
         Self {
             map: Mutex::new(LinkedHashMap::new()),
@@ -46,12 +46,12 @@ impl Cache {
         }
     }
 
-    /// 命中时克隆报文并把 id 改写为当前查询 id，同时把条目刷新为最近使用（LRU）。
-    /// bool 表示已过期（需后台刷新）。
+    /// On a hit, clone the message and rewrite its id to the current query id, and refresh the entry as most recently used (LRU).
+    /// The bool indicates it has expired (needs a background refresh).
     pub fn get(&self, key: &CacheKey, query_id: u16) -> Option<(Message, bool)> {
         self.lookups.fetch_add(1, Ordering::Relaxed);
         let mut map = self.map.lock().ok()?;
-        let entry = map.to_back(key)?; // LRU：命中即移到队尾
+        let entry = map.to_back(key)?; // LRU: move to the tail on a hit
         self.hits.fetch_add(1, Ordering::Relaxed);
         let mut msg = entry.message.clone();
         msg.metadata.id = query_id;
@@ -59,7 +59,7 @@ impl Cache {
         Some((msg, expired))
     }
 
-    /// TTL = answers 最小 TTL（无 answers 用 60s）。
+    /// TTL = the minimum TTL among the answers (60s when there are no answers).
     pub fn put(&self, key: CacheKey, message: Message) {
         let ttl = message.answers.iter().map(|r| r.ttl).min().unwrap_or(60);
         let entry = CacheEntry {
@@ -67,9 +67,9 @@ impl Cache {
             expires_at: Instant::now() + Duration::from_secs(u64::from(ttl)),
         };
         if let Ok(mut map) = self.map.lock() {
-            map.remove(&key); // 旧条目移除，保证重新入队尾
-            // 小内存机器：操作系统拒绝内存申请时视作队列已满，按 LRU 逐出换空间；
-            // 全部逐出仍申请不到则放弃本次写入（丢一条缓存无害）。
+            map.remove(&key); // remove the old entry to guarantee re-insertion at the tail
+            // Low-memory machines: when the OS refuses a memory request, treat the queue as full and evict by LRU to make room;
+            // if the request still fails after evicting everything, give up on this write (dropping one cache entry is harmless).
             if !reserve_or_evict(&mut map, 1) {
                 return;
             }
@@ -84,7 +84,7 @@ impl Cache {
         self.map.lock().map(|m| m.len()).unwrap_or(0)
     }
 
-    /// 自进程启动以来的累计 (查询次数, 命中次数)；过期的乐观命中也算命中。
+    /// Cumulative (lookups, hits) since process start; expired optimistic hits count as hits too.
     pub fn hit_stats(&self) -> (u64, u64) {
         (
             self.lookups.load(Ordering::Relaxed),
@@ -97,8 +97,8 @@ impl Cache {
     }
 }
 
-/// 为将插入的 `want` 条预留空间；分配失败则按 LRU 逐出最久未用重试。
-/// 返回 false 表示逐空后仍申请不到内存。
+/// Reserve space for the `want` entries about to be inserted; on allocation failure, evict the least recently used by LRU and retry.
+/// Returns false when memory still cannot be obtained after everything has been evicted.
 fn reserve_or_evict(map: &mut LinkedHashMap<CacheKey, CacheEntry>, want: usize) -> bool {
     while map.try_reserve(want).is_err() {
         if map.pop_front().is_none() {
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn expired_entry_still_returned_marked_expired() {
         let cache = Cache::new(10);
-        cache.put(key("stale.com."), response(1, "stale.com.", 0)); // TTL 0 → 立即过期
+        cache.put(key("stale.com."), response(1, "stale.com.", 0)); // TTL 0 → expires immediately
         let (_, expired) = cache.get(&key("stale.com."), 2).expect("optimistic hit");
         assert!(
             expired,
@@ -160,14 +160,14 @@ mod tests {
         let cache = Cache::new(2);
         cache.put(key("a.com."), response(1, "a.com.", 300));
         cache.put(key("b.com."), response(2, "b.com.", 300));
-        // 读 a——LRU 下 a 变为最近使用，b 成为最久未用
+        // read a — under LRU, a becomes most recently used and b becomes least recently used
         cache.get(&key("a.com."), 7);
         cache.put(key("c.com."), response(3, "c.com.", 300));
         assert!(
             cache.get(&key("b.com."), 7).is_none(),
-            "b 最久未用，必须最先被逐出"
+            "b is least recently used and must be evicted first"
         );
-        assert!(cache.get(&key("a.com."), 7).is_some(), "a 被读过，应存活");
+        assert!(cache.get(&key("a.com."), 7).is_some(), "a was read and should survive");
         assert!(cache.get(&key("c.com."), 7).is_some());
     }
 
@@ -176,8 +176,8 @@ mod tests {
         let cache = Cache::new(2);
         cache.put(key("a.com."), response(1, "a.com.", 300));
         cache.put(key("b.com."), response(2, "b.com.", 300));
-        cache.put(key("a.com."), response(9, "a.com.", 300)); // 刷新 a → 移到队尾
-        cache.put(key("c.com."), response(3, "c.com.", 300)); // 应逐出 b（现最旧）
+        cache.put(key("a.com."), response(9, "a.com.", 300)); // refresh a → move to the tail
+        cache.put(key("c.com."), response(3, "c.com.", 300)); // should evict b (now the oldest)
         assert!(cache.get(&key("b.com."), 7).is_none());
         assert!(cache.get(&key("a.com."), 7).is_some());
         assert_eq!(cache.len(), 2);
@@ -192,7 +192,7 @@ mod tests {
         };
         map.insert(key("a.com."), entry("a.com."));
         map.insert(key("b.com."), entry("b.com."));
-        // 用不可能满足的容量模拟 OS 拒绝内存申请：应先按 LRU 逐出，逐空仍失败则放弃
+        // Use an impossible-to-satisfy capacity to simulate the OS refusing a memory request: it should evict by LRU first, then give up if it still fails after emptying
         assert!(
             !reserve_or_evict(&mut map, isize::MAX as usize),
             "impossible reservation fails"
@@ -218,6 +218,6 @@ mod tests {
         cache.put(key("stale.com."), response(1, "stale.com.", 0));
         cache.get(&key("stale.com."), 3);
 
-        assert_eq!(cache.hit_stats(), (3, 2), "1 次未命中 + 2 次命中（含过期）");
+        assert_eq!(cache.hit_stats(), (3, 2), "1 miss + 2 hits (including expired)");
     }
 }

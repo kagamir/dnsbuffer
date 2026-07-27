@@ -1,5 +1,6 @@
-# 只把 CI 预编译的二进制与示例配置放进构建上下文，
-# 其余（target/、.git 等，可能有数 GB）全部排除，避免拖慢 docker build。
+# Put only the CI-prebuilt binary and the example config into the build
+# context, and exclude everything else (target/, .git, etc., possibly several
+# GB) to avoid slowing down docker build.
 *
 !dnsbuffer
 !config.example.toml

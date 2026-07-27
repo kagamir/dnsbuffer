@@ -43,25 +43,25 @@ fn default_hedged_retry_ms() -> u64 {
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub listen: SocketAddr,
-    /// 单查询总超时（毫秒），包裹「上游+后备」整链，最终安全网。
+    /// Total per-query timeout (milliseconds), wrapping the entire "upstream + fallback" chain as the final safety net.
     #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
-    /// 主上游阶段预算（毫秒）：失败或超过此时限即切换 fallback 兜底。
+    /// Primary upstream stage budget (milliseconds): on failure or exceeding this deadline, switch to the fallback.
     #[serde(default = "default_upstream_timeout_ms")]
     pub upstream_timeout_ms: u64,
-    /// 拨号上游时的地址族偏好：true 则 IPv6 优先；默认 false（IPv4 优先）。
+    /// Address-family preference when dialing the upstream: true prefers IPv6; default false (IPv4 first).
     #[serde(default)]
     pub prefer_ipv6: bool,
-    /// 对冲式重试间隔（毫秒）：主上游尝试超过该时长未返回，即并行发起新尝试
-    /// 而不取消在途的；任一返回即胜出，直到 upstream_timeout_ms 耗尽。0 表示禁用。
+    /// Hedged retry interval (milliseconds): if the primary upstream attempt does not return within this
+    /// duration, start a new attempt in parallel without cancelling the in-flight one; whichever returns first wins, until upstream_timeout_ms is exhausted. 0 disables it.
     #[serde(default = "default_hedged_retry_ms")]
     pub hedged_retry_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LogConfig {
-    /// 日志等级：error | warn | info | debug | trace（也接受 EnvFilter 指令语法，
-    /// 如 "warn,dnsbuffer=debug"）；RUST_LOG 环境变量优先于此配置。
+    /// Log level: error | warn | info | debug | trace (also accepts EnvFilter directive syntax,
+    /// e.g. "warn,dnsbuffer=debug"); the RUST_LOG environment variable takes precedence over this config.
     #[serde(default = "default_log_level")]
     pub level: String,
 }
@@ -155,7 +155,7 @@ fn default_retention_days() -> u32 {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct EcsConfig {
-    /// 配置了子网（如 "203.0.113.0/24"）则注入 ECS，否则不使用 ECS。
+    /// If a subnet is configured (e.g. "203.0.113.0/24"), inject ECS; otherwise ECS is not used.
     #[serde(default)]
     pub fixed_subnet: Option<String>,
 }
@@ -203,21 +203,21 @@ pub enum UpstreamConfig {
         url: String,
         #[serde(default)]
         ech: String,
-        /// 默认 HTTP/2；显式 http3 = true 则仅用 HTTP/3（严格按配置，不回退 H2）。
+        /// Defaults to HTTP/2; an explicit http3 = true uses HTTP/3 only (strictly as configured, no fallback to H2).
         #[serde(default)]
         http3: bool,
-        /// 可选：该 DoH 域名的 IP（仅一个）；留空经 bootstrap 解析域名。
+        /// Optional: the IP for this DoH domain (only one); leave empty to resolve the domain via bootstrap.
         #[serde(default)]
         ip: Option<IpAddr>,
     },
     Dot {
-        /// 服务器 IP；端口写在 domain 里（`host` 或 `host:port`），默认 853。
+        /// Server IP; the port is written in the domain (`host` or `host:port`), default 853.
         ip: IpAddr,
         domain: String,
     },
 }
 
-/// 拆分 DoT 的 `domain` 为（SNI 主机名, 端口）；未写端口默认 853。
+/// Split a DoT `domain` into (SNI hostname, port); defaults to 853 when no port is written.
 pub fn split_domain_port(domain: &str) -> Result<(String, u16)> {
     match domain.rsplit_once(':') {
         Some((host, port)) => {
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(cfg.dashboard.retention_days, 7);
         assert_eq!(
             cfg.cache.max_entries, 10_000,
-            "缺省 [cache] 段时也必须使用 10000 默认容量"
+            "the 10000 default capacity must be used even when the [cache] section is absent"
         );
 
         let custom = "[dashboard]\nlisten = \"127.0.0.1:9090\"\ndatabase_path = \"data/stats.db\"\nretention_days = 0";

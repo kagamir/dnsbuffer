@@ -8,8 +8,8 @@ use tokio::time::timeout;
 
 use crate::resolver::Resolver;
 
-/// 明文 UDP 上游解析器：把查询原样转发到目标地址并读回应答。
-/// 用于 bootstrap 的 IP 上游、fallback 的 IP 上游，以及本计划的转发链路验证。
+/// Plaintext UDP upstream resolver: forwards the query verbatim to the target address and reads back the reply.
+/// Used for the bootstrap IP upstream, the fallback IP upstream, and this plan's forwarding-path verification.
 pub struct PlainResolver {
     addr: SocketAddr,
     timeout: Duration,
@@ -69,7 +69,7 @@ mod tests {
     use std::str::FromStr;
     use tokio::net::UdpSocket;
 
-    /// 构造一个基于查询的 NOERROR 响应。
+    /// Builds a NOERROR response based on the query.
     fn make_response(query: &Message) -> Message {
         let mut resp = Message::new(
             query.metadata.id,
@@ -83,7 +83,7 @@ mod tests {
         resp
     }
 
-    /// 起一个只回固定 NOERROR 响应的 mock UDP DNS 上游，返回其地址。
+    /// Starts a mock UDP DNS upstream that only replies with a fixed NOERROR response, returning its address.
     async fn spawn_mock_upstream() -> SocketAddr {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();
@@ -98,7 +98,7 @@ mod tests {
         addr
     }
 
-    /// 起一个回复错误 id 响应的 mock UDP DNS 上游。
+    /// Starts a mock UDP DNS upstream that replies with a wrong-id response.
     async fn spawn_bad_id_upstream() -> SocketAddr {
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = sock.local_addr().unwrap();

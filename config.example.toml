@@ -1,24 +1,24 @@
 [server]
 listen = "0.0.0.0:53"
 query_timeout_ms = 10000
-upstream_timeout_ms = 5000       # 主上游阶段预算：失败或超时即切 fallback
-prefer_ipv6 = false              # 拨号上游的地址族偏好；true 则 IPv6 优先（默认 IPv4 优先）
-hedged_retry_ms = 1000           # 对冲式重试间隔：超时未返回即并行再发起尝试；0 禁用
+upstream_timeout_ms = 5000       # Budget for the primary upstream stage: on failure or timeout, switch to fallback
+prefer_ipv6 = false              # Address-family preference when dialing upstreams; true prefers IPv6 (default prefers IPv4)
+hedged_retry_ms = 1000           # Hedged retry interval: if no reply by this time, fire a parallel attempt; 0 disables
 
 [log]
-level = "info"           # error | warn | info | debug | trace；RUST_LOG 环境变量优先
-                         # warn 只看启动信息与配置问题；info 额外显示请求失败/重试
+level = "info"           # error | warn | info | debug | trace; the RUST_LOG environment variable takes precedence
+                         # warn shows only startup info and config issues; info additionally shows request failures/retries
 
 [dashboard]
-listen = "0.0.0.0:8080"       # 无认证；仅暴露到可信网络，或使用带认证的反向代理
-database_path = "data/dnsbuffer.db" # 相对路径以进程工作目录为基准；初始化失败将阻止程序启动
-retention_days = 7              # 允许 0-9999；0 永久保留；1-15 天按小时趋势，16+ 天按天，0 显示最近 30 个日桶
+listen = "0.0.0.0:8080"       # No authentication; expose only to a trusted network, or use an authenticated reverse proxy
+database_path = "data/dnsbuffer.db" # Relative paths are resolved against the process working directory; a failed init prevents the program from starting
+retention_days = 7              # Allowed 0-9999; 0 keeps forever; 1-15 days trend by hour, 16+ days by day, 0 shows the last 30 daily buckets
 
 [cache]
 max_entries = 10000
 
 [ecs]
-# fixed_subnet = "203.0.113.0/24"   # 配置则注入该子网作为 ECS；不配置则不使用 ECS
+# fixed_subnet = "203.0.113.0/24"   # If set, inject this subnet as ECS; if unset, ECS is not used
 
 [selector]
 window = 32
@@ -42,14 +42,14 @@ addrs = ["192.168.1.1"]
 [[upstream]]
 type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
-http3 = true             # 默认 http/2；显式设 true 则仅用 http/3（严格按配置，不回退 H2）
-# ech = ""            # 可选：静态 base64 ECHConfigList；留空则经 bootstrap HTTPS 记录动态获取
-# ip = "104.16.248.249"  # 可选：该域名的 IP（仅一个，v4/v6 皆可）；留空经 bootstrap 解析
+http3 = true             # Defaults to http/2; setting true explicitly uses http/3 only (strictly as configured, no fallback to H2)
+# ech = ""            # Optional: a static base64 ECHConfigList; leave empty to fetch it dynamically via the bootstrap HTTPS record
+# ip = "104.16.248.249"  # Optional: the IP for this domain (exactly one, v4 or v6); leave empty to resolve via bootstrap
 
 [[upstream]]
 type = "dot"
 ip = "9.9.9.9"
-domain = "dns.quad9.net"     # 端口写在这里（如 "dns.quad9.net:8853"），默认 853
+domain = "dns.quad9.net"     # Put the port here (e.g. "dns.quad9.net:8853"); defaults to 853
 
 [[bootstrap.server]]
 type = "plain"

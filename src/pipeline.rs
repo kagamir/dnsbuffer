@@ -24,7 +24,7 @@ pub struct PipelineParts {
     pub recorder: Recorder,
 }
 
-/// 查询编排：hosts → filter → cache(乐观) → ECS 注入 → 上游链 → SERVFAIL。
+/// Query orchestration: hosts → filter → cache (optimistic) → ECS injection → upstream chain → SERVFAIL.
 pub struct Pipeline {
     hosts: HostsMap,
     filter: Arc<Filter>,
@@ -52,7 +52,7 @@ impl Pipeline {
 
     fn prepared_query(&self, query: &Message) -> Message {
         let mut q = query.clone();
-        // 默认剥离客户端自带的 ECS，避免泄露客户端真实来源
+        // By default strip the client-supplied ECS to avoid leaking the client's real origin
         if let Some(edns) = q.edns.as_mut() {
             edns.options_mut()
                 .remove(hickory_proto::rr::rdata::opt::EdnsCode::Subnet);
@@ -70,7 +70,7 @@ impl Pipeline {
             .map_err(|_| anyhow::anyhow!("query timed out after {:?}", self.query_timeout))?
     }
 
-    /// 处理单个查询，始终返回一个可回给客户端的响应报文。
+    /// Handle a single query, always returning a response message that can be sent back to the client.
     pub async fn handle(&self, query: &Message) -> Message {
         let started = Instant::now();
         let started_at_ms = chrono::Utc::now().timestamp_millis();
@@ -85,7 +85,7 @@ impl Pipeline {
         } else if self.filter.is_blocked(&qname) {
             (self.filter.block_response(query), true, false)
         } else {
-            // 3. 乐观缓存
+            // 3. Optimistic cache
             let key = CacheKey::from_query(query);
             let outcome = if let Some((key, cached, expired)) = key.as_ref().and_then(|key| {
                 self.cache
@@ -95,11 +95,11 @@ impl Pipeline {
                 if expired {
                     self.spawn_refresh(key.clone(), query.clone());
                 }
-                // 缓存的屏蔽型应答（过滤上游返回的 0.0.0.0/::）也计入屏蔽
+                // Cached block-type responses (0.0.0.0/:: returned by a filtering upstream) also count as blocked
                 let blocked = is_blocked_response(&cached);
                 (cached, blocked, true)
             } else {
-                // 4. 上游
+                // 4. Upstream
                 let response = match self.resolve_upstream(query).await {
                     Ok(resp) => {
                         if resp.metadata.response_code == ResponseCode::NoError
@@ -117,7 +117,7 @@ impl Pipeline {
                 let blocked = is_blocked_response(&response);
                 (response, blocked, false)
             };
-            // 每个经过缓存的请求处理完（含可能的写入）后描一个观测点
+            // Take an observation point after each cache-processed request completes (including any write)
             self.cache_sampler.observe();
             outcome
         };
@@ -160,7 +160,7 @@ impl Pipeline {
         });
     }
 
-    /// 过期命中后的后台刷新：拿新结果替换缓存（删旧入队尾）。
+    /// Background refresh after an expired hit: replace the cache with the fresh result (remove old, enqueue at tail).
     fn spawn_refresh(&self, key: CacheKey, query: Message) {
         let cache = self.cache.clone();
         let upstream = self.upstream.clone();
@@ -189,10 +189,10 @@ impl Pipeline {
     }
 }
 
-/// 按响应内容识别屏蔽型应答：NoError、存在 A/AAAA 记录、且地址记录全部
-/// 指向未指定地址（0.0.0.0 / ::）。本地过滤器与过滤型上游（NextDNS、
-/// AdGuard DNS 等）都用这种形态表示屏蔽，因此上游返回或缓存命中的
-/// 屏蔽应答也能被统计为屏蔽。
+/// Identify a block-type response by its content: NoError, A/AAAA records present, and all
+/// address records point to the unspecified address (0.0.0.0 / ::). Both the local filter and
+/// filtering upstreams (NextDNS, AdGuard DNS, etc.) use this shape to signal a block, so block
+/// responses returned by the upstream or served from cache can also be counted as blocked.
 fn is_blocked_response(message: &Message) -> bool {
     if message.metadata.response_code != ResponseCode::NoError {
         return false;
@@ -294,7 +294,7 @@ mod tests {
         }
     }
 
-    /// 计数并返回一条 TTL 0 的 A 记录（NoError）——放入缓存后立即过期。
+    /// Counts and returns a single TTL 0 A record (NoError) — expires immediately once cached.
     struct CountingTtlZero(Arc<AtomicUsize>);
     #[async_trait]
     impl Resolver for CountingTtlZero {
@@ -328,7 +328,7 @@ mod tests {
         m
     }
 
-    /// 过滤型上游（如 NextDNS）：以 0.0.0.0 应答表示屏蔽。
+    /// Filtering upstream (e.g. NextDNS): signals a block by responding with 0.0.0.0.
     struct FilteringUpstream;
     #[async_trait]
     impl Resolver for FilteringUpstream {
@@ -379,15 +379,15 @@ mod tests {
         )));
         assert!(
             !is_blocked_response(&build(vec![real.clone()], ResponseCode::NoError)),
-            "真实地址不是屏蔽"
+            "a real address is not a block"
         );
         assert!(
             !is_blocked_response(&build(vec![zero4.clone(), real], ResponseCode::NoError)),
-            "混有真实地址不算屏蔽"
+            "a mix containing a real address does not count as a block"
         );
         assert!(
             !is_blocked_response(&build(vec![], ResponseCode::NoError)),
-            "无地址记录不算屏蔽"
+            "no address records does not count as a block"
         );
         assert!(!is_blocked_response(&build(
             vec![zero4],
@@ -401,12 +401,12 @@ mod tests {
 
         pipeline.handle(&sample_query()).await;
         let first = events.recv().await.unwrap();
-        assert!(first.blocked, "上游返回 0.0.0.0 计为屏蔽");
+        assert!(first.blocked, "upstream returning 0.0.0.0 counts as blocked");
         assert!(!first.cache_hit);
 
         pipeline.handle(&sample_query()).await;
         let second = events.recv().await.unwrap();
-        assert!(second.blocked, "缓存命中的屏蔽应答同样计为屏蔽");
+        assert!(second.blocked, "a cache-hit block response counts as blocked too");
         assert!(second.cache_hit);
     }
 
@@ -608,22 +608,23 @@ mod tests {
 
     #[tokio::test]
     async fn expired_cache_hit_triggers_background_refresh() {
-        // CountingTtlZero 返回 TTL 0 → put 后立即过期；第二次 handle 命中过期缓存
-        // 返回旧值，同时后台刷新应再次调用上游（计数最终为 2）
+        // CountingTtlZero returns TTL 0 → expires immediately after put; the second handle hits the
+        // expired cache and returns the stale value, while the background refresh should call the
+        // upstream again (final count is 2)
         let counter = Arc::new(AtomicUsize::new(0));
         let resolver = Arc::new(CountingTtlZero(counter.clone()));
         let pipeline = Pipeline::new(default_parts(resolver));
         let q = sample_query();
-        let _ = pipeline.handle(&q).await; // 首查 → 上游 1 次 + 入缓存(TTL0)
-        let resp = pipeline.handle(&q).await; // 过期命中 → 立即返回 + 后台刷新
+        let _ = pipeline.handle(&q).await; // first query → 1 upstream call + cache insert (TTL0)
+        let resp = pipeline.handle(&q).await; // expired hit → return immediately + background refresh
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
-        tokio::time::sleep(Duration::from_millis(200)).await; // 等后台任务
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "后台刷新必须调用上游");
+        tokio::time::sleep(Duration::from_millis(200)).await; // wait for the background task
+        assert_eq!(counter.load(Ordering::SeqCst), 2, "background refresh must call the upstream");
     }
 
     #[test]
     fn prepared_query_strips_client_supplied_ecs_when_disabled() {
-        // 客户端自带 ECS 选项，pipeline 未配置 ecs（None）——必须剥离，不得转发上游
+        // The client supplies an ECS option and the pipeline has no ecs configured (None) — it must be stripped, not forwarded upstream
         let pipeline = Pipeline::new(default_parts(Arc::new(OkResolver)));
         let mut q = sample_query();
         let client_subnet = crate::ecs::parse_subnet("198.51.100.0/24").unwrap();
@@ -639,7 +640,7 @@ mod tests {
 
         let prepared = pipeline.prepared_query(&q);
 
-        // wire 往返，确保编解码层面也不携带 ECS
+        // wire round-trip to ensure ECS is not carried at the encoding/decoding level either
         let bytes = prepared.to_vec().unwrap();
         let decoded = Message::from_vec(&bytes).unwrap();
         let has_subnet = decoded

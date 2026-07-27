@@ -17,9 +17,9 @@ use crate::resolver::Resolver;
 
 type H2Sender = hyper::client::conn::http2::SendRequest<Full<Bytes>>;
 
-/// DNS-over-HTTPS 上游（RFC 8484，POST application/dns-message）。
-/// 严格按配置选协议：http3=true 仅用 H3（doh3 模块），否则仅用 H2（连接复用，断线重连一次）。
-/// H3 失败不降级 H2，由上层（组内重选/对冲/fallback）兜底。
+/// DNS-over-HTTPS upstream (RFC 8484, POST application/dns-message).
+/// Chooses the protocol strictly by configuration: http3=true uses only H3 (the doh3 module), otherwise only H2 (connection reuse, reconnect once on disconnect).
+/// An H3 failure does not downgrade to H2; the upper layer (in-group reselection / hedging / fallback) handles it.
 pub struct DohResolver {
     host: String,
     port: u16,
@@ -99,7 +99,7 @@ impl DohResolver {
         })
     }
 
-    /// 测试专用：缩短超时以避免 QUIC 连接到无人监听端口时的长等待拖慢测试。
+    /// Test-only: shortens the timeout to avoid the long wait (and slow tests) when QUIC connects to a port with no listener.
     #[cfg(test)]
     fn set_timeout(&mut self, d: Duration) {
         self.timeout = d;
@@ -116,8 +116,8 @@ impl DohResolver {
                         .connect(server_name, tcp)
                         .await
                         .context("DoH TLS handshake")?;
-                    // ping 保活：防 NAT 映射过期；空闲死链在 keep_alive_timeout 内
-                    // 被判死，send_request 立即失败并走上面的重连重试
+                    // ping keep-alive: prevents NAT mapping expiry; an idle dead link is
+                    // declared dead within keep_alive_timeout, so send_request fails immediately and goes through the reconnect retry above
                     let (sender, conn) =
                         hyper::client::conn::http2::Builder::new(TokioExecutor::new())
                             .timer(hyper_util::rt::TokioTimer::new())
@@ -147,7 +147,7 @@ impl DohResolver {
     async fn resolve_h2(&self, query: &Message) -> Result<Message> {
         let body = query.to_vec().context("encoding query")?;
         for attempt in 0..2 {
-            // 锁内只做取用/建连并克隆 sender；请求发送在锁外，保住 H2 多路复用
+            // Inside the lock only fetch/establish the connection and clone the sender; the request is sent outside the lock to preserve H2 multiplexing
             let mut sender = {
                 let mut guard = self.h2.lock().await;
                 if guard.is_none() {
@@ -180,7 +180,7 @@ impl DohResolver {
                     return Ok(msg);
                 }
                 Err(e) => {
-                    *self.h2.lock().await = None; // 连接失效，下轮重连
+                    *self.h2.lock().await = None; // connection is dead, reconnect on the next round
                     if attempt == 1 {
                         return Err(e).context("h2 send_request failed after reconnect");
                     }
@@ -237,12 +237,12 @@ mod tests {
     use super::*;
     use crate::resolver::Resolver;
 
-    /// 起一个 HTTPS(H2) mock DoH server：对 POST /dns-query 回 NoError 响应。
+    /// Starts an HTTPS(H2) mock DoH server: replies to POST /dns-query with a NoError response.
     async fn spawn_mock_doh_server() -> (SocketAddr, CertificateDer<'static>) {
         spawn_mock_doh_server_at("127.0.0.1:0", None).await
     }
 
-    /// 同上，但可指定绑定地址与应答记录（用于区分「哪台服务器接到了请求」）。
+    /// Same as above, but lets you specify the bind address and the answer record (used to tell "which server received the request").
     async fn spawn_mock_doh_server_at(
         bind: &str,
         answer_ip: Option<std::net::IpAddr>,
@@ -329,7 +329,7 @@ mod tests {
             &url,
             vec![addr.ip()],
             None,
-            false, // 本测试仅 H2
+            false, // this test uses H2 only
             false,
             &[root],
         )
@@ -342,8 +342,8 @@ mod tests {
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
     }
 
-    /// v4 与 v6 两台 mock 用同一端口号（先绑 v4 拿端口，再绑 [::1] 同端口），
-    /// 各自应答带本机族标记记录，据此判断实际连到了哪台。
+    /// The v4 and v6 mocks use the same port number (bind v4 first to grab a port, then bind [::1] on the same port),
+    /// and each answers with a record tagged by its own family, so we can tell which one was actually connected to.
     async fn spawn_dual_family_servers() -> (u16, Vec<CertificateDer<'static>>) {
         let (addr4, root4) =
             spawn_mock_doh_server_at("127.0.0.1:0", Some("1.2.3.4".parse().unwrap())).await;
@@ -359,7 +359,7 @@ mod tests {
         use hickory_proto::rr::rdata::AAAA;
         let (port, roots) = spawn_dual_family_servers().await;
         let url = format!("https://localhost:{port}/dns-query");
-        // 配置顺序故意 v4 在前：prefer_ipv6 = true 时仍必须先连 IPv6
+        // Config order deliberately puts v4 first: with prefer_ipv6 = true it must still connect to IPv6 first
         let resolver = DohResolver::with_extra_roots(
             &url,
             vec!["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
@@ -383,7 +383,7 @@ mod tests {
         use hickory_proto::rr::rdata::A;
         let (port, roots) = spawn_dual_family_servers().await;
         let url = format!("https://localhost:{port}/dns-query");
-        // 配置顺序故意 v6 在前：默认（prefer_ipv6 = false）必须先连 IPv4
+        // Config order deliberately puts v6 first: by default (prefer_ipv6 = false) it must connect to IPv4 first
         let resolver = DohResolver::with_extra_roots(
             &url,
             vec!["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()],
@@ -409,12 +409,12 @@ mod tests {
             &url,
             vec![addr.ip()],
             None,
-            true, // http3 = true 严格走 H3；mock 只有 TCP(H2) 端点 → 必须失败而非回退 H2
+            true, // http3 = true strictly uses H3; the mock only has a TCP(H2) endpoint → it must fail rather than fall back to H2
             false,
             &[root],
         )
         .unwrap();
-        // mock 服务器无 UDP 端点：QUIC 会等到 idle timeout。缩短超时避免测试变慢。
+        // The mock server has no UDP endpoint: QUIC would wait until the idle timeout. Shorten the timeout to avoid slow tests.
         resolver.set_timeout(Duration::from_millis(300));
         assert!(
             resolver.resolve(&sample_query()).await.is_err(),
@@ -440,7 +440,7 @@ mod tests {
     #[tokio::test]
     async fn bare_url_defaults_to_dns_query_path() {
         let (addr, root) = spawn_mock_doh_server().await;
-        let url = format!("https://localhost:{}", addr.port()); // 无 path
+        let url = format!("https://localhost:{}", addr.port()); // no path
         let resolver =
             DohResolver::with_extra_roots(&url, vec![addr.ip()], None, false, false, &[root])
                 .unwrap();

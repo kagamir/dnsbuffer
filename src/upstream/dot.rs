@@ -12,8 +12,8 @@ use tokio_rustls::TlsConnector;
 
 use crate::resolver::Resolver;
 
-/// DNS-over-TLS 上游（RFC 7858）：TCP + TLS(SNI=domain) + 2 字节长度前缀。
-/// 每查询新建连接；连接复用留待后续优化。
+/// DNS-over-TLS upstream (RFC 7858): TCP + TLS(SNI=domain) + 2-byte length prefix.
+/// A new connection is created per query; connection reuse is left for a later optimization.
 pub struct DotResolver {
     addr: SocketAddr,
     server_name: ServerName<'static>,
@@ -101,9 +101,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// 生成 localhost 自签证书，起一个单连接 mock DoT server，
-    /// 返回 (addr, 根证书) 供客户端信任。
-    /// 若 bad_id 为 true，响应 ID 会被改为 query.id + 1。
+    /// Generates a self-signed localhost certificate and starts a single-connection mock DoT server,
+    /// returning (addr, root certificate) for the client to trust.
+    /// If bad_id is true, the response ID is changed to query.id + 1.
     async fn spawn_mock_dot_server(bad_id: bool) -> (SocketAddr, CertificateDer<'static>) {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = CertificateDer::from(cert.cert);
@@ -130,7 +130,7 @@ mod tests {
             let mut data = vec![0u8; n];
             tls.read_exact(&mut data).await.unwrap();
             let query = Message::from_vec(&data).unwrap();
-            // mirror 仓库既有响应构造模式
+            // mirror the repository's existing response-construction pattern
             let resp_id = if bad_id {
                 query.metadata.id.wrapping_add(1)
             } else {

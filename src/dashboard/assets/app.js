@@ -84,10 +84,10 @@
     const samples = normalizeCount(upstream.samples);
     const successes = normalizeCount(upstream.successes);
     const failureRate = Math.max(0, Number(upstream.failure_rate) || 0);
-    if (samples === 0) return { text: "暂无数据", kind: "neutral" };
-    if (successes === 0) return { text: "不可用", kind: "bad" };
-    if (failureRate > 0 || successes < samples) return { text: "有失败", kind: "warn" };
-    return { text: "正常", kind: "good" };
+    if (samples === 0) return { text: "No data", kind: "neutral" };
+    if (successes === 0) return { text: "Unavailable", kind: "bad" };
+    if (failureRate > 0 || successes < samples) return { text: "Has failures", kind: "warn" };
+    return { text: "Healthy", kind: "good" };
   }
 
   function start() {
@@ -132,7 +132,7 @@
       const dot = document.querySelector(".status-dot");
       refreshButton.disabled = true;
       status.removeAttribute("aria-live");
-      status.textContent = "正在更新";
+      status.textContent = "Updating";
       dot.className = "status-dot is-loading";
     }
     function finishRefreshStatus(result) {
@@ -140,18 +140,18 @@
       refreshButton.disabled = false;
       const status = document.querySelector("#refresh-status");
       const dot = document.querySelector(".status-dot");
-      status.textContent = result.success ? "全部区域已更新" : result.failed ? `${result.failed} 个区域更新失败` : "部分区域已被新请求替代";
+      status.textContent = result.success ? "All sections updated" : result.failed ? `${result.failed} section(s) failed to update` : "Some sections were superseded by a newer request";
       if (result.success) {
         status.removeAttribute("aria-live");
         dot.className = "status-dot";
-        document.querySelector("#last-updated").textContent = `最后成功：${new Date().toLocaleTimeString()}`;
+        document.querySelector("#last-updated").textContent = `Last success: ${new Date().toLocaleTimeString()}`;
       } else {
         status.setAttribute("aria-live", "assertive");
         dot.className = "status-dot has-error";
       }
     }
     async function loadRegion(name, url, render, report) {
-      // report 用于没有 .panel-error 的小区域（如标题里的平均响应耗时）自定义失败提示
+      // report provides a custom failure message for small sections without a .panel-error (e.g. the average response time in the heading)
       const notify = report || ((message) => setError(name, message));
       state.controllers.get(name)?.abort();
       const controller = new AbortController();
@@ -167,7 +167,7 @@
       } catch (error) {
         const result = classifyRegionResult({ aborted: error.name === "AbortError", current: state.controllers.get(name) === controller, failed: true });
         if (result === "failure") {
-          notify("更新失败，正在保留上次数据");
+          notify("Update failed; keeping the previous data");
         }
         return result;
       } finally {
@@ -178,17 +178,17 @@
       const buckets = Array.isArray(data.buckets) ? data.buckets : [];
       const start = new Date(data.start);
       const end = new Date(data.end);
-      const aggregation = data.granularity === "day" ? "按日聚合" : "按小时聚合";
+      const aggregation = data.granularity === "day" ? "Aggregated by day" : "Aggregated by hour";
       if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) throw new Error("invalid trend range");
       state.trendData = { buckets, granularity: data.granularity };
       window.DnsTrendChart.render(document.querySelector("#trend-chart"), buckets, data.granularity);
-      document.querySelector("#trend-range").textContent = `${aggregation} · ${start.toLocaleString()} 至 ${end.toLocaleString()}`;
+      document.querySelector("#trend-range").textContent = `${aggregation} · ${start.toLocaleString()} to ${end.toLocaleString()}`;
       const totals = buckets.reduce((sum, bucket) => ({
         total: sum.total + window.DnsTrendChart.normalizeValue(bucket.total_queries),
         blocked: sum.blocked + window.DnsTrendChart.normalizeValue(bucket.blocked_queries),
         cache: sum.cache + window.DnsTrendChart.normalizeValue(bucket.cache_hits)
       }), { total: 0, blocked: 0, cache: 0 });
-      document.querySelector("#trend-summary").textContent = `${aggregation}，共 ${window.DnsTrendChart.formatCount(totals.total)} 次查询，${window.DnsTrendChart.formatCount(totals.blocked)} 次屏蔽，${window.DnsTrendChart.formatCount(totals.cache)} 次缓存命中`;
+      document.querySelector("#trend-summary").textContent = `${aggregation}: ${window.DnsTrendChart.formatCount(totals.total)} queries, ${window.DnsTrendChart.formatCount(totals.blocked)} blocked, ${window.DnsTrendChart.formatCount(totals.cache)} cache hits`;
     }
     function renderCache(data) {
       const points = Array.isArray(data.points) ? data.points : [];
@@ -196,19 +196,19 @@
       window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), data);
       const format = window.DnsTrendChart.formatCount;
       if (!points.length || !data.current) {
-        document.querySelector("#cache-note").textContent = "正在收集观测数据（每个请求记录一次）";
-        document.querySelector("#cache-summary").textContent = "缓存命中率曲线暂无观测数据";
+        document.querySelector("#cache-note").textContent = "Collecting observations (one recorded per request)";
+        document.querySelector("#cache-summary").textContent = "No observations yet for the cache hit rate curve";
         return;
       }
       const percent = `${(Math.min(1, Math.max(0, Number(data.current.hit_rate) || 0)) * 100).toFixed(1)}%`;
       document.querySelector("#cache-note").textContent =
-        `观测点 ${points.length} · 当前 ${format(data.current_entries)} / ${format(data.max_entries)} 条 · 累计命中率 ${percent}`;
+        `${points.length} observations · current ${format(data.current_entries)} / ${format(data.max_entries)} entries · cumulative hit rate ${percent}`;
       document.querySelector("#cache-summary").textContent =
-        `已按缓存条数记录 ${points.length} 个命中率观测点，当前缓存 ${format(data.current_entries)} 条（配置上限 ${format(data.max_entries)}），累计命中率 ${percent}`;
+        `Recorded ${points.length} hit rate observations by cache entry count; current cache holds ${format(data.current_entries)} entries (configured limit ${format(data.max_entries)}), cumulative hit rate ${percent}`;
     }
     function renderUpstreams(data) {
       const target = document.querySelector("#upstream-list");
-      if (!Array.isArray(data) || data.length === 0) return replaceChildren(target, [element("p", "暂无上游数据", "empty")]);
+      if (!Array.isArray(data) || data.length === 0) return replaceChildren(target, [element("p", "No upstream data", "empty")]);
       replaceChildren(target, data.map((upstream) => {
         const card = element("article", undefined, "upstream-card");
         const heading = element("div", undefined, "upstream-heading");
@@ -218,7 +218,7 @@
         heading.append(names, element("span", status.text, `badge badge-${status.kind}`));
         const metrics = element("dl", undefined, "metrics");
         const latency = Number(upstream.avg_latency_ms);
-        [["平均延迟", Number.isFinite(latency) ? `${latency.toFixed(1)} ms` : "--"], ["样本", upstream.samples], ["失败率", `${((Number(upstream.failure_rate) || 0) * 100).toFixed(1)}%`]].forEach(([label, value]) => {
+        [["Avg latency", Number.isFinite(latency) ? `${latency.toFixed(1)} ms` : "--"], ["Samples", upstream.samples], ["Failure rate", `${((Number(upstream.failure_rate) || 0) * 100).toFixed(1)}%`]].forEach(([label, value]) => {
           const group = element("div"); group.append(element("dt", label), element("dd", value)); metrics.append(group);
         });
         card.append(heading, metrics); return card;
@@ -235,7 +235,7 @@
     }
     function renderRankings(data) {
       const body = document.querySelector("#ranking-body");
-      if (!Array.isArray(data) || data.length === 0) return replaceChildren(body, [emptyRow(4, "暂无域名排行")]);
+      if (!Array.isArray(data) || data.length === 0) return replaceChildren(body, [emptyRow(4, "No domain rankings")]);
       replaceChildren(body, data.map((record, index) => {
         const row = element("tr"); const domain = element("td");
         domain.append(element("span", String(index + 1).padStart(2, "0"), "rank"), element("span", record.domain));
@@ -245,17 +245,17 @@
     function addBadge(target, text, kind) { target.append(element("span", text, `badge ${kind}`)); }
     function renderQueries(data) {
       const body = document.querySelector("#query-body"); const records = Array.isArray(data.records) ? data.records : [];
-      if (!records.length) replaceChildren(body, [emptyRow(5, state.search ? "没有匹配的查询记录" : "暂无查询记录")]);
+      if (!records.length) replaceChildren(body, [emptyRow(5, state.search ? "No matching query records" : "No query records")]);
       else replaceChildren(body, records.map((record) => {
         const row = element("tr"); const date = new Date(record.timestamp); const domain = element("td");
         domain.append(element("strong", record.domain), element("span", record.query_type, "muted block"));
         const ips = element("td"); const responseIps = Array.isArray(record.response_ips) ? record.response_ips : [];
         if (!responseIps.length) ips.append(element("span", "--", "muted")); else responseIps.forEach((ip) => ips.append(element("code", ip)));
         const result = element("td", undefined, "result-cell"); addBadge(result, record.response_code || "UNKNOWN", "badge-neutral");
-        if (record.blocked) addBadge(result, "已屏蔽", "badge-blocked"); if (record.cache_hit) addBadge(result, "缓存", "badge-cache");
+        if (record.blocked) addBadge(result, "Blocked", "badge-blocked"); if (record.cache_hit) addBadge(result, "Cache", "badge-cache");
         row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, element("td", `${record.duration_ms} ms`), result); return row;
       }));
-      document.querySelector("#page-status").textContent = `第 ${state.page} / ${state.totalPages} 页 · ${window.DnsTrendChart.formatCount(data.total)} 条`;
+      document.querySelector("#page-status").textContent = `Page ${state.page} / ${state.totalPages} · ${window.DnsTrendChart.formatCount(data.total)} records`;
       updatePagination();
     }
     async function loadQueries(corrected, roundId) {
@@ -271,7 +271,7 @@
         if (action === "render") renderQueries(data);
       });
       if (success === "success" && action === "retry") return loadQueries(true, roundId);
-      if (success === "success" && action === "reject") setError("queries", "数据总数连续变化，已保留上次查询结果");
+      if (success === "success" && action === "reject") setError("queries", "The total count kept changing; keeping the previous query results");
       if (mayFinishQuery(requestId, state.queryRequestId)) setQueryLoading(false);
       return mapQueryResult(success, action);
     }
@@ -305,7 +305,7 @@
       if (state.trendData) window.DnsTrendChart.render(document.querySelector("#trend-chart"), state.trendData.buckets, state.trendData.granularity);
       if (state.cacheData) window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), state.cacheData);
     }, 120); });
-    // 手动刷新：不做定时轮询，用户点击时服务端才计算各区域统计，减轻服务端压力
+    // Manual refresh: no periodic polling; the server only computes each section's stats when the user clicks, reducing server load
     refreshButton.addEventListener("click", refreshAll);
     updatePagination(); refreshAll();
   }

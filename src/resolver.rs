@@ -2,13 +2,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 
-/// 所有上游解析器（明文/DoH/DoT）实现的统一抽象。
+/// A unified abstraction implemented by all upstream resolvers (plaintext/DoH/DoT).
 #[async_trait]
 pub trait Resolver: Send + Sync {
     async fn resolve(&self, query: &Message) -> Result<Message>;
 }
 
-/// 构造一个与请求同 id、回显问题段、响应码为 SERVFAIL 的响应报文。
+/// Builds a response message with the same id as the request, echoing the question section, with response code SERVFAIL.
 pub fn servfail(query: &Message) -> Message {
     let mut resp = Message::new(
         query.metadata.id,

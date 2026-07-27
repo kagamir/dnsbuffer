@@ -1,24 +1,28 @@
 name: release
 
-# 发布 GitHub Release 时触发：为 linux/amd64、linux/arm64 分别编译二进制并
-# 附加到 Release，同时构建并推送多架构 Docker 镜像到 GHCR。
-# workflow_dispatch 便于手动验证流水线（不会上传 Release 资产，镜像以分支名打 tag）。
+# Triggered when a GitHub Release is published: build binaries for
+# linux/amd64 and linux/arm64 separately and attach them to the Release, while
+# also building and pushing a multi-arch Docker image to GHCR.
+# workflow_dispatch makes it easy to manually validate the pipeline (it does
+# not upload Release assets, and the image is tagged with the branch name).
 on:
   release:
     types: [published]
   workflow_dispatch:
 
 permissions:
-  contents: write   # 上传 Release 资产
-  packages: write   # 推送镜像到 GHCR
+  contents: write   # Upload Release assets
+  packages: write   # Push images to GHCR
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
-  # ── 每个架构在自己的原生 runner 上编译 ──────────────────────────────
-  # 目标为 musl 静态链接：产物不依赖任何系统 libc，可直接放进 alpine 镜像，
-  # 也能跑在任意 Linux 发行版上（build 主机的 glibc 版本不再影响兼容性）。
+  # ── Each architecture is compiled on its own native runner ──────────────
+  # The target is musl static linking: the artifact does not depend on any
+  # system libc, can be dropped straight into an alpine image, and also runs on
+  # any Linux distribution (the build host's glibc version no longer affects
+  # compatibility).
   build:
     name: build ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -35,8 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # aws-lc-rs 的构建脚本需要 C 编译器与 cmake；musl-tools 提供
-      # musl-gcc（各 runner 原生架构对应的 musl 交叉编译包装器）
+      # The aws-lc-rs build script needs a C compiler and cmake; musl-tools
+      # provides musl-gcc (the musl cross-compilation wrapper for each runner's
+      # native architecture)
       - name: Install build deps
         run: |
           sudo apt-get update
@@ -55,7 +60,7 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
-          # cc/cmake 构建脚本（aws-lc-sys 等）交叉编译 musl 目标时使用 musl-gcc
+          # cc/cmake build scripts (aws-lc-sys, etc.) use musl-gcc when cross-compiling for the musl target
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
@@ -89,7 +94,7 @@ jobs:
             ${{ steps.pkg.outputs.tarball }}
             ${{ steps.pkg.outputs.tarball }}.sha256
 
-      # ── Docker：在原生 runner 上单架构构建，按 digest 推送（无需 QEMU）──
+      # ── Docker: single-arch build on a native runner, pushed by digest (no QEMU needed) ──
       - name: Compute image name (lowercase)
         id: img
         run: echo "image=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
@@ -131,7 +136,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # ── 把两个单架构 digest 合并成一个多架构 manifest list 并打 tag ──────
+  # ── Merge the two single-arch digests into one multi-arch manifest list and tag it ──
   docker-manifest:
     name: merge multi-arch manifest
     needs: build

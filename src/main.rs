@@ -8,7 +8,7 @@ use dnsbuffer::{config, dashboard};
 #[derive(Parser, Debug)]
 #[command(name = "dnsbuffer", about = "A DNS proxy with DoH/ECH upstreams")]
 struct Args {
-    /// 配置文件路径
+    /// Path to the configuration file
     #[arg(short, long, default_value = "config.toml")]
     config: PathBuf,
 }
@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::load(&args.config)?;
 
-    // 日志等级来自配置文件 log.level；RUST_LOG 环境变量优先（便于临时调试）
+    // The log level comes from the config file's log.level; the RUST_LOG environment variable takes precedence (convenient for ad-hoc debugging)
     let filter = match std::env::var("RUST_LOG") {
         Ok(env) => tracing_subscriber::EnvFilter::try_new(&env)
             .with_context(|| format!("invalid RUST_LOG {env:?}"))?,

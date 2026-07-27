@@ -8,9 +8,9 @@
   "use strict";
 
   const series = [
-    { key: "total_queries", label: "全部查询", color: "#5eead4", dash: [] },
-    { key: "blocked_queries", label: "已屏蔽", color: "#fb7185", dash: [7, 5] },
-    { key: "cache_hits", label: "缓存命中", color: "#fbbf24", dash: [2, 4] }
+    { key: "total_queries", label: "All queries", color: "#5eead4", dash: [] },
+    { key: "blocked_queries", label: "Blocked", color: "#fb7185", dash: [7, 5] },
+    { key: "cache_hits", label: "Cache hits", color: "#fbbf24", dash: [2, 4] }
   ];
 
   const chartStates = new WeakMap();
@@ -35,7 +35,7 @@
     return date.toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
   }
 
-  /* 将画布内 x 坐标映射到最近的数据桶下标；落在绘图区（含 8px 容差）外返回 null。 */
+  /* Maps an x coordinate within the canvas to the nearest data bucket index; returns null when it falls outside the plot area (with an 8px tolerance). */
   function hoverIndex(x, left, plotWidth, count) {
     if (!Number.isFinite(x) || !Number.isFinite(left) || !Number.isFinite(plotWidth)) return null;
     if (plotWidth <= 0 || !Number.isInteger(count) || count <= 0) return null;
@@ -45,7 +45,7 @@
     return Math.round(ratio * (count - 1));
   }
 
-  /* 悬浮提示的三行内容：与图例同色同序。 */
+  /* The three lines of the hover tooltip: same colors and order as the legend. */
   function tooltipRows(bucket) {
     return series.map(({ key, label, color }) => ({
       label,
@@ -54,9 +54,9 @@
     }));
   }
 
-  /* 观测曲线的 x 轴上限：以观测点范围为主，向上取整到易读刻度；
-     配置容量在观测最大值 10 倍以内时也纳入范围，否则不为它撑大坐标轴
-     （渲染时会在角落以文字标注配置值）。 */
+  /* Upper x-axis bound for the observation curve: driven mainly by the range of observed points, rounded up to a readable tick;
+     the configured capacity is also included when it is within 10x the observed maximum, otherwise the axis is not stretched for it
+     (during rendering the configured value is annotated with text in the corner). */
   function cacheCurveAxisMax(points, maxEntries) {
     const observed = Math.max(
       1,
@@ -96,7 +96,7 @@
     const buckets = state.buckets;
     if (!Array.isArray(buckets) || buckets.length === 0) {
       state.layout = null;
-      return drawEmpty(context, width, height, "暂无查询数据");
+      return drawEmpty(context, width, height, "No query data");
     }
 
     const maximum = Math.max(1, ...buckets.map((bucket) => normalizeValue(bucket.total_queries)));
@@ -238,12 +238,12 @@
     bindHover(canvas);
   }
 
-  /* 命中率-缓存大小曲线：每个点是一次观测 (当时缓存条数, 累计命中率)，
-     按容量升序连成线；竖虚线标记配置容量，空心圆标记最近一次观测。 */
+  /* Hit rate vs. cache size curve: each point is one observation (cache entry count at that time, cumulative hit rate),
+     connected into a line in ascending order of capacity; a dashed vertical line marks the configured capacity, and a hollow circle marks the most recent observation. */
   function renderCacheCurve(canvas, data) {
     const { context, width, height } = setupCanvas(canvas, 160);
     const points = Array.isArray(data && data.points) ? data.points : [];
-    if (points.length === 0) return drawEmpty(context, width, height, "正在收集观测数据...");
+    if (points.length === 0) return drawEmpty(context, width, height, "Collecting observations...");
 
     const configured = normalizeValue(data.max_entries);
     const maxSize = cacheCurveAxisMax(points, configured);
@@ -287,13 +287,13 @@
       context.fillStyle = "#fbbf24";
       context.textBaseline = "alphabetic";
       context.textAlign = configX > width - 70 ? "right" : "left";
-      context.fillText(`配置 ${formatCount(configured)}`, configX + (configX > width - 70 ? -5 : 5), inset.top + 10);
+      context.fillText(`Configured ${formatCount(configured)}`, configX + (configX > width - 70 ? -5 : 5), inset.top + 10);
     } else if (configured >= 1) {
-      // 配置容量远超观测范围：不为它撑大坐标轴，只在右上角提示
+      // Configured capacity far exceeds the observed range: don't stretch the axis for it, just annotate in the top-right corner
       context.fillStyle = "#fbbf24";
       context.textBaseline = "alphabetic";
       context.textAlign = "right";
-      context.fillText(`配置 ${formatCount(configured)} →`, width - inset.right, inset.top + 10);
+      context.fillText(`Configured ${formatCount(configured)} →`, width - inset.right, inset.top + 10);
     }
 
     context.strokeStyle = "#5eead4";

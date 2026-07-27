@@ -581,7 +581,7 @@ async fn queries_validate_pagination_search_and_return_utc_timestamps() {
         "/api/dashboard/queries?page_size=201",
         "/api/dashboard/queries?page_size=x",
         &format!("/api/dashboard/queries?search={}", "a".repeat(254)),
-        &format!("/api/dashboard/queries?search={}", "界".repeat(254)),
+        &format!("/api/dashboard/queries?search={}", "é".repeat(254)),
     ] {
         assert_eq!(
             request(app.clone(), uri).await.status(),
@@ -589,7 +589,7 @@ async fn queries_validate_pagination_search_and_return_utc_timestamps() {
         );
     }
 
-    let unicode_limit = format!("/api/dashboard/queries?search={}", "界".repeat(253));
+    let unicode_limit = format!("/api/dashboard/queries?search={}", "é".repeat(253));
     assert_eq!(request(app, &unicode_limit).await.status(), StatusCode::OK);
 }
 
@@ -753,12 +753,12 @@ async fn cache_curve_endpoint_reports_observed_size_and_hit_rate_points() {
         ));
         message
     };
-    // 观测 1：1 条缓存，累计 2 次查询 1 次命中
+    // Observation 1: 1 cache entry, 2 cumulative queries with 1 hit
     cache.get(&key("hot.example"), 1);
     cache.put(key("hot.example"), cached_response("hot.example"));
     cache.get(&key("hot.example"), 2);
     sampler.observe();
-    // 观测 2：2 条缓存，累计 3 次查询 2 次命中
+    // Observation 2: 2 cache entries, 3 cumulative queries with 2 hits
     cache.put(key("second.example"), cached_response("second.example"));
     cache.get(&key("second.example"), 3);
     sampler.observe();
@@ -774,7 +774,7 @@ async fn cache_curve_endpoint_reports_observed_size_and_hit_rate_points() {
     let expected = 2.0 / 3.0;
     assert!((body["current"]["hit_rate"].as_f64().unwrap() - expected).abs() < 1e-9);
     let points = body["points"].as_array().unwrap();
-    assert_eq!(points.len(), 3, "含初始 (0, 0) 观测点");
+    assert_eq!(points.len(), 3, "includes the initial (0, 0) observation point");
     assert_eq!(
         (points[0]["size"].as_u64(), points[0]["hit_rate"].as_f64()),
         (Some(0), Some(0.0))

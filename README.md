@@ -1,50 +1,50 @@
 # dnsbuffer
 
-用 Rust 编写的本地 DNS 代理。监听 UDP 53 端口，把查询经加密上游（DoH / DoT）转发，内置乐观缓存、广告屏蔽、自定义 hosts、EDNS 客户端子网与后备 DNS。
+A local DNS proxy written in Rust. It listens on UDP port 53 and forwards queries over an encrypted upstream (DoH / DoT), with built-in optimistic caching, ad blocking, custom hosts, EDNS Client Subnet, and fallback DNS.
 
-## 特性
+## Features
 
-- **DoH 上游**：严格按配置选协议——默认 HTTP/2，`http3 = true` 则仅用 HTTP/3（QUIC），不做协议降级；连接复用、多路复用；长连接保活（H2 ping / QUIC keep-alive 15s），复用前检查连接死活、失败自动重连再试，长时间放置后首个请求不再死等超时；可用 `ip` 指定单个服务器 IP（v4/v6 皆可），留空经 bootstrap 解析，解析结果按拨号地址族偏好排序（`prefer_ipv6`，默认 IPv4 优先）
-- **ECH（Encrypted Client Hello）**：静态配置 base64 优先，缺省时经 bootstrap 从 HTTPS/SVCB 记录动态获取；均不可用时回退普通 TLS 并告警
-- **DoT 上游**：rustls TLS + RFC 7858 长度前缀帧；`ip` 指定服务器 IP，端口写在 `domain` 中（默认 853）
-- **智能调度**：每个上游维护滑动窗口统计（失败率 × 平均延迟），按权重 `w = 1/((t_avg+ε)(1+k·f))` 加权随机选择，失败自动降权重选
-- **Bootstrap DNS**：支持 IP / DoH / DoT 形态；非 IP 形态必须显式注明域名对应 IP
-- **对冲式重试**：主上游尝试超过 `hedged_retry_ms`（默认 1000ms）未返回，即并行发起新尝试且不取消在途的（重新加权选择，大概率换上游）；任一返回即胜出，直到 `upstream_timeout_ms` 预算耗尽
-- **后备 DNS**：主上游组全部失败或超时后自动接管（IP / DoH / DoT）
-- **乐观缓存**：纯内存 LRU（hashlink 链式哈希表）——命中即回（过期也返回），过期命中触发后台异步刷新，超限逐出最久未用；只缓存 NoError；小内存机器友好——操作系统拒绝内存申请时视作缓存已满，按 LRU 逐出换空间而不是崩溃
-- **自定义 hosts**：精确匹配 + `*.` 通配，直接本地应答
-- **广告屏蔽**：adblock 语法子集（`||domain^`、`@@||domain^` 例外）+ hosts 语法 + 纯域名列表；本地文件与远程 URL 混用，远程源支持按周期热更新（ArcSwap 无锁替换）；命中返回 `0.0.0.0` / `::`；豁免列表优先
-- **EDNS 客户端子网（ECS）**：配置 `fixed_subnet` 则注入该子网，不配置则不使用 ECS；始终剥离客户端自带 ECS 保护隐私
-- **健壮性**：响应 id 全链路校验、单查询总超时预算、任何上游故障均降级为 SERVFAIL 而非崩溃
-- **查询仪表板**：内置 Web 页面展示查询趋势、查询明细、域名排名和上游滑动窗口状态，查询记录保存在 SQLite
+- **DoH upstream**: strictly picks the protocol per config — HTTP/2 by default, or HTTP/3 (QUIC) only when `http3 = true`, with no protocol downgrade; connection reuse and multiplexing; keep-alive for long-lived connections (H2 ping / QUIC keep-alive 15s), liveness checks before reuse, automatic reconnect-and-retry on failure, so the first request after a long idle period no longer waits out the full timeout; you can set `ip` to a single server IP (v4 or v6), or leave it blank to resolve via bootstrap, with resolved results ordered by the dialing address-family preference (`prefer_ipv6`, IPv4-first by default)
+- **ECH (Encrypted Client Hello)**: a statically configured base64 value takes priority; when absent, it is fetched dynamically from HTTPS/SVCB records via bootstrap; if neither is available, it falls back to plain TLS with a warning
+- **DoT upstream**: rustls TLS + RFC 7858 length-prefixed framing; `ip` specifies the server IP, and the port is written in `domain` (default 853)
+- **Smart scheduling**: each upstream maintains sliding-window statistics (failure rate x average latency) and is chosen by weighted random selection with weight `w = 1/((t_avg+ε)(1+k·f))`, automatically down-weighting on failure
+- **Bootstrap DNS**: supports IP / DoH / DoT forms; non-IP forms must explicitly note the domain's corresponding IP
+- **Hedged retries**: if the primary upstream attempt does not return within `hedged_retry_ms` (default 1000ms), a new attempt is launched in parallel without cancelling the in-flight one (re-weighted selection, very likely switching upstreams); whichever returns first wins, until the `upstream_timeout_ms` budget is exhausted
+- **Fallback DNS**: automatically takes over after the entire primary upstream group fails or times out (IP / DoH / DoT)
+- **Optimistic cache**: pure in-memory LRU (hashlink chained hash table) — a hit returns immediately (even if expired), an expired hit triggers a background async refresh, and the least-recently-used entry is evicted when the limit is exceeded; only NoError responses are cached; friendly to low-memory machines — when the OS refuses a memory allocation it is treated as a full cache and evicts by LRU to make room instead of crashing
+- **Custom hosts**: exact match + `*.` wildcard, answered directly and locally
+- **Ad blocking**: a subset of adblock syntax (`||domain^`, `@@||domain^` exceptions) + hosts syntax + plain domain lists; local files and remote URLs can be mixed, and remote sources support periodic hot updates (lock-free swap via ArcSwap); a hit returns `0.0.0.0` / `::`; the allowlist takes priority
+- **EDNS Client Subnet (ECS)**: setting `fixed_subnet` injects that subnet, otherwise ECS is not used; the client's own ECS is always stripped to protect privacy
+- **Robustness**: response id validation across the whole chain, a total timeout budget per query, and any upstream failure degrades to SERVFAIL rather than crashing
+- **Query dashboard**: a built-in web page shows query trends, query details, domain rankings, and upstream sliding-window status, with query records stored in SQLite
 
-## 构建
+## Building
 
-需要 Rust 1.85+（2024 edition）。
+Requires Rust 1.85+ (2024 edition).
 
 ```bash
 cargo build --release
-# 产物：target/release/dnsbuffer
+# Artifact: target/release/dnsbuffer
 ```
 
-## 运行
+## Running
 
 ```bash
-# 监听 53 端口需要特权，或用 setcap 授权：
+# Listening on port 53 requires privileges, or grant it via setcap:
 sudo setcap cap_net_bind_service=+ep target/release/dnsbuffer
 
 dnsbuffer --config /etc/dnsbuffer/config.toml
 ```
 
-- 配置路径默认 `config.toml`（`-c` / `--config` 指定）
-- 日志级别在配置文件 `[log] level` 设置（默认 `info`）；`RUST_LOG` 环境变量优先，便于临时调试，如 `RUST_LOG=debug dnsbuffer ...`
-- 级别约定：启动信息（"dnsbuffer starting" / "listening on udp"）为 WARN，配置问题为 WARN，请求失败与重试/切换 fallback 等运行期波动为 INFO——设 `level = "warn"` 可只保留启动与配置告警
-- 仪表板默认访问地址为 `http://<主机IP>:8080/`。它没有认证；将 `[dashboard] listen` 设为 `0.0.0.0:8080` 会向所有可达网络暴露查询历史。应使用防火墙将 TCP 8080 限制到可信网段；如需额外访问控制，可选用带认证的反向代理
-- SQLite 数据库会在启动时创建并迁移；路径不可写、目录不存在或数据库初始化失败会使整个程序启动失败，DNS 服务也不会启动
+- The config path defaults to `config.toml` (set with `-c` / `--config`)
+- The log level is set in the config file via `[log] level` (default `info`); the `RUST_LOG` environment variable takes priority, which is handy for temporary debugging, e.g. `RUST_LOG=debug dnsbuffer ...`
+- Level conventions: startup messages ("dnsbuffer starting" / "listening on udp") are WARN, configuration issues are WARN, and runtime fluctuations such as request failures and retries/fallback switches are INFO — setting `level = "warn"` keeps only startup and configuration warnings
+- The dashboard is reachable by default at `http://<host IP>:8080/`. It has no authentication; setting `[dashboard] listen` to `0.0.0.0:8080` exposes the query history to every reachable network. You should use a firewall to restrict TCP 8080 to trusted subnets; if you need additional access control, consider an authenticating reverse proxy
+- The SQLite database is created and migrated at startup; if the path is not writable, the directory does not exist, or database initialization fails, the whole program fails to start and the DNS service does not start either
 
 ## Docker
 
-多架构镜像（`linux/amd64`、`linux/arm64`）随每次 GitHub Release 自动构建并推送到 GHCR：
+Multi-arch images (`linux/amd64`, `linux/arm64`) are built automatically on each GitHub Release and pushed to GHCR:
 
 ```bash
 docker pull ghcr.io/kagamir/dnsbuffer:latest
@@ -59,109 +59,109 @@ docker run -d --name dnsbuffer \
   -v $(pwd)/data/:/opt/dnsbuffer/data/ \
   ghcr.io/kagamir/dnsbuffer:latest
 ```
-- 若挂载了远程规则源的本地文件（`[[adblock.rule_source]] path = ...`），一并 `-v` 进容器
-- 可用标签：`latest`、`vX.Y.Z`、`X.Y`（如 `v0.1.0`、`0.1`）
+- If you mount local files for remote rule sources (`[[adblock.rule_source]] path = ...`), `-v` them into the container as well
+- Available tags: `latest`, `vX.Y.Z`, `X.Y` (e.g. `v0.1.0`, `0.1`)
 
-## 配置
+## Configuration
 
-完整示例见 [`config.example.toml`](config.example.toml)。所有节除 `[server]` 与 `[[upstream]]` 外均可省略。
+See [`config.example.toml`](config.example.toml) for a complete example. Every section except `[server]` and `[[upstream]]` can be omitted.
 
 ```toml
 [server]
-listen = "0.0.0.0:53"        # 监听地址（仅 UDP）
-query_timeout_ms = 10000     # 单查询总超时（毫秒），包裹上游+后备整链
-prefer_ipv6 = false          # 拨号上游的地址族偏好；true 则 IPv6 优先（默认 IPv4 优先）
-hedged_retry_ms = 1000       # 对冲式重试间隔（毫秒）；0 禁用
+listen = "0.0.0.0:53"        # Listen address (UDP only)
+query_timeout_ms = 10000     # Total per-query timeout (ms), wrapping the entire upstream + fallback chain
+prefer_ipv6 = false          # Address-family preference when dialing upstreams; true means IPv6-first (IPv4-first by default)
+hedged_retry_ms = 1000       # Hedged retry interval (ms); 0 disables it
 
 [log]
-level = "info"               # error | warn | info | debug | trace；RUST_LOG 环境变量优先
+level = "info"               # error | warn | info | debug | trace; the RUST_LOG environment variable takes priority
 
 [dashboard]
-listen = "0.0.0.0:8080"      # 无认证；仅暴露到可信网络，或使用带认证的反向代理
-database_path = "data/dnsbuffer.db" # 相对路径以进程工作目录为基准；目录须已存在，初始化失败将阻止程序启动
-retention_days = 7            # 允许 0-9999；0 表示永久保留
+listen = "0.0.0.0:8080"      # No authentication; expose only to trusted networks, or use an authenticating reverse proxy
+database_path = "data/dnsbuffer.db" # A relative path is based on the process working directory; the directory must already exist, and an initialization failure prevents the program from starting
+retention_days = 7            # Allows 0-9999; 0 means keep forever
 
 [cache]
-max_entries = 10000          # LRU 缓存最大条数
+max_entries = 10000          # Maximum number of LRU cache entries
 
 [ecs]
-# fixed_subnet = "203.0.113.0/24"   # 配置则注入该子网作为 ECS；不配置则不使用 ECS
+# fixed_subnet = "203.0.113.0/24"   # If set, inject this subnet as ECS; if unset, ECS is not used
 
-[selector]                   # 上游加权随机参数
-window = 32                  # 滑动窗口样本数
-k = 5.0                      # 失败率惩罚系数
+[selector]                   # Upstream weighted-random parameters
+window = 32                  # Number of sliding-window samples
+k = 5.0                      # Failure-rate penalty coefficient
 
 [adblock]
-allowlist = ["allowed.example.com"]   # 豁免域（后缀匹配，优先于屏蔽）
-block_response = "zero"               # 命中返回 0.0.0.0 / ::
+allowlist = ["allowed.example.com"]   # Exempt domains (suffix match, takes priority over blocking)
+block_response = "zero"               # A hit returns 0.0.0.0 / ::
 
-[[adblock.rule_source]]      # 规则源可多个，path 与 url 二选一
+[[adblock.rule_source]]      # Multiple rule sources allowed; choose either path or url
 url = "https://example.com/easylist.txt"
-update_interval = "24h"      # 更新周期（humantime 格式）；省略则仅启动拉取一次
+update_interval = "24h"      # Update period (humantime format); if omitted, fetch only once at startup
 
 [[adblock.rule_source]]
 path = "/etc/dnsbuffer/extra-rules.txt"
 
-[[hosts]]                    # 自定义 hosts，可多条
-name = "router.local"        # 支持 "*.lab.example" 通配
+[[hosts]]                    # Custom hosts, multiple entries allowed
+name = "router.local"        # Supports "*.lab.example" wildcards
 addrs = ["192.168.1.1", "fd00::1"]
 
-# ---- 上游（可多个，同组内加权随机调度）----
+# ---- Upstreams (multiple allowed, weighted-random scheduling within a group) ----
 
 [[upstream]]
 type = "doh"
 url = "https://cloudflare-dns.com/dns-query"
-http3 = true                 # 默认 http/2；显式 true 则仅用 http/3（严格按配置，不回退 H2）
-# ech = "base64..."          # 可选：静态 ECHConfigList；留空自动经 HTTPS 记录获取
-# ip = "104.16.248.249"     # 可选：该域名的 IP（仅一个，v4/v6 皆可）；留空经 bootstrap 解析域名
+http3 = true                 # http/2 by default; an explicit true uses http/3 only (strictly per config, no H2 fallback)
+# ech = "base64..."          # Optional: static ECHConfigList; leave blank to fetch automatically via HTTPS records
+# ip = "104.16.248.249"     # Optional: the IP for this domain (a single one, v4 or v6); leave blank to resolve the domain via bootstrap
 
 [[upstream]]
 type = "dot"
 ip = "9.9.9.9"
-domain = "dns.quad9.net"     # TLS SNI / 证书校验域名；端口写在这里（如 "dns.quad9.net:8853"），默认 853
+domain = "dns.quad9.net"     # TLS SNI / certificate validation domain; the port goes here (e.g. "dns.quad9.net:8853"), default 853
 
 [[upstream]]
-type = "plain"               # 明文 UDP（不推荐作主上游）
+type = "plain"               # Plaintext UDP (not recommended as a primary upstream)
 addr = "1.1.1.1:53"
 
-# ---- Bootstrap：为 DoH 域名解析 IP、拉取 ECH 配置、解析规则源域名 ----
+# ---- Bootstrap: resolves IPs for DoH domains, fetches ECH config, and resolves rule-source domains ----
 
 [[bootstrap.server]]
 type = "plain"
 addr = "1.1.1.1:53"
 
-# bootstrap 也可用 doh/dot，但必须显式给出 ip：
+# bootstrap can also use doh/dot, but ip must be given explicitly:
 # [[bootstrap.server]]
 # type = "doh"
 # url = "https://bootstrap.example/dns-query"
-# ip = "203.0.113.10"        # 非 IP 形态必填
+# ip = "203.0.113.10"        # Required for non-IP forms
 
-# ---- 后备：主上游组全部失败时接管 ----
+# ---- Fallback: takes over when the entire primary upstream group fails ----
 
 [[fallback]]
 type = "plain"
 addr = "8.8.8.8:53"
 ```
 
-### 仪表板数据口径
+### Dashboard data semantics
 
-- **查询趋势**：按保留期展示总查询数、广告屏蔽数和缓存命中数；`retention_days` 为 1 至 15 天时按小时（最多 361 桶），16 天及以上按天，0（永久保留）固定展示最近 30 个 UTC 日历桶。正数保留期的首尾时间是首、末桶的 RFC 3339 起点，返回所有与精确保留窗口相交的桶，因此非整点/非午夜请求通常比天数换算值多一个部分桶
-- **查询明细**：显示时间、查询域名、类型、响应码、耗时、屏蔽/缓存状态和响应 IP；搜索对域名和响应 IP 做完整包含匹配，前导通配语义需要扫描现存数据，索引主要保证分页、关联和精确前缀结构，不虚称加速任意片段搜索。API 每页默认 50、最多 200 条；不搜索客户端 IP（dnsbuffer 不采集客户端 IP）
-- **域名排名**：单个域名前 20 列表，按查询次数排序，并为每个域名附带总查询、屏蔽和缓存命中计数
-- **上游状态**：来自进程内滑动窗口，只反映最近样本的成功率和平均延迟，不是 SQLite 保留期内的历史汇总，重启后重新统计
+- **Query trends**: shows total queries, ad-blocked count, and cache hits over the retention period; when `retention_days` is 1 to 15 days it buckets by hour (up to 361 buckets), 16 days and above by day, and 0 (keep forever) always shows the most recent 30 UTC calendar buckets. For a positive retention period, the start and end times are the RFC 3339 origins of the first and last buckets, and all buckets intersecting the exact retention window are returned, so a non-hourly / non-midnight request usually yields one more partial bucket than the day-count conversion would suggest
+- **Query details**: shows time, queried domain, type, response code, latency, block/cache status, and response IP; search does a full-substring match on domain and response IP, leading-wildcard semantics require scanning existing data, and indexes mainly guarantee pagination, joins, and exact prefix structure — they do not falsely claim to speed up arbitrary substring search. The API returns 50 per page by default, up to 200; it does not search client IP (dnsbuffer does not collect client IPs)
+- **Domain rankings**: a top-20 list of individual domains sorted by query count, each with total query, block, and cache-hit counts
+- **Upstream status**: comes from the in-process sliding window and reflects only the success rate and average latency of recent samples — it is not a historical aggregate over the SQLite retention period, and it is recomputed from scratch after a restart
 
-`retention_days` 默认是 7，允许范围为 0 到 9999。设置为正数时，程序会定期清理早于该天数的查询明细，只删除完整落在截止点之前的聚合桶；设置为 0 时不清理 SQLite 历史。单条 DNS 包最大 65535 字节，因此响应 IP 数量天然有协议上限；服务不截断 IP，避免破坏反查口径，而 HTTP 每页 200 条限制响应规模。`database_path` 的相对路径相对于 dnsbuffer 的进程工作目录，而不是配置文件所在目录。
+`retention_days` defaults to 7, with an allowed range of 0 to 9999. When set to a positive value, the program periodically prunes query details older than that many days, deleting only aggregate buckets that fall entirely before the cutoff; when set to 0, SQLite history is never pruned. A single DNS packet is at most 65535 bytes, so the number of response IPs has a natural protocol ceiling; the service does not truncate IPs, to avoid breaking reverse-lookup semantics, while the HTTP page limit of 200 caps the response size. The relative path in `database_path` is relative to dnsbuffer's process working directory, not the directory containing the config file.
 
-### 查询处理顺序
+### Query processing order
 
 ```
-UDP 收包 → hosts 匹配 → 广告屏蔽 → LRU 缓存（乐观命中，过期后台刷新）
-        → ECS 注入 → 上游组（加权随机 + 失败重选，超 hedged_retry_ms 对冲并发重试）→ 后备组 → SERVFAIL
+UDP packet in → hosts match → ad blocking → LRU cache (optimistic hit, background refresh after expiry)
+        → ECS injection → upstream group (weighted random + reselect on failure, hedged concurrent retry past hedged_retry_ms) → fallback group → SERVFAIL
 ```
 
-## systemd 服务示例
+## systemd service example
 
-`/etc/systemd/system/dnsbuffer.service`：
+`/etc/systemd/system/dnsbuffer.service`:
 
 ```ini
 [Unit]
@@ -173,7 +173,7 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/dnsbuffer --config /etc/dnsbuffer/config.toml
 Restart=on-failure
 RestartSec=2
-# 免 root 绑定 53 端口
+# Bind port 53 without root
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -188,37 +188,37 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now dnsbuffer
 ```
 
-## 架构
+## Architecture
 
 ```
 src/
-  main.rs         入口：命令行 + 配置加载 + 启动
-  config.rs       TOML 配置结构与校验
-  server.rs       UDP 监听循环（每包 spawn，单包错误不中断服务）
-  pipeline.rs     查询编排（hosts→filter→cache→ECS→上游链）
-  resolver.rs     Resolver trait（所有上游/组/回退链的统一抽象）
+  main.rs         Entry point: command line + config loading + startup
+  config.rs       TOML config structures and validation
+  server.rs       UDP listen loop (spawn per packet, a single-packet error does not interrupt the service)
+  pipeline.rs     Query orchestration (hosts→filter→cache→ECS→upstream chain)
+  resolver.rs     Resolver trait (a unified abstraction for all upstreams/groups/fallback chains)
   upstream/
-    plain.rs      明文 UDP 上游
-    dot.rs        DoT 上游
-    doh.rs        DoH 上游（按配置严格走 H2 或 H3）
-    doh3.rs       HTTP/3 连接封装（quinn/h3）
-    selector.rs   加权随机抽取（纯函数）
-    group.rs      上游组（统计反馈 + 重选）+ FallbackResolver
-    hedged.rs     对冲式重试（hedged_retry_ms 并发再尝试）
-  bootstrap.rs    上游域名 IP 解析 + HTTPS 记录 ECH 获取
-  cache.rs        纯内存 LRU 乐观缓存
-  hosts.rs        自定义 hosts
-  filter.rs       广告屏蔽（解析/匹配/热更新）
-  fetch.rs        规则文件 HTTP(S) 拉取
-  ecs.rs          EDNS 客户端子网
-  stats.rs        上游滑动窗口统计
-  tls.rs          rustls 客户端配置（含 ECH）
+    plain.rs      Plaintext UDP upstream
+    dot.rs        DoT upstream
+    doh.rs        DoH upstream (strictly H2 or H3 per config)
+    doh3.rs       HTTP/3 connection wrapper (quinn/h3)
+    selector.rs   Weighted-random selection (pure function)
+    group.rs      Upstream group (stats feedback + reselect) + FallbackResolver
+    hedged.rs     Hedged retries (concurrent re-attempt after hedged_retry_ms)
+  bootstrap.rs    Upstream domain IP resolution + ECH fetch from HTTPS records
+  cache.rs        Pure in-memory LRU optimistic cache
+  hosts.rs        Custom hosts
+  filter.rs       Ad blocking (parse/match/hot update)
+  fetch.rs        Rule-file HTTP(S) fetching
+  ecs.rs          EDNS Client Subnet
+  stats.rs        Upstream sliding-window statistics
+  tls.rs          rustls client configuration (including ECH)
 ```
 
-测试：`cargo test --all-targets --all-features`（单元 + 端到端集成，含 mock DoT/DoH/H3/HTTP 服务器）。
+Tests: `cargo test --all-targets --all-features` (unit + end-to-end integration, including mock DoT/DoH/H3/HTTP servers).
 
-## 已知限制
+## Known limitations
 
-- 缓存不落盘，重启即空
-- 规则远程源拉取失败时保留上一次成功规则集；首次即失败则该源为空，等下个周期
-- 过期热点键在上游持续故障时的后台刷新无去重（自愈型，上游恢复即停止）
+- The cache is not persisted to disk and is empty on restart
+- When a remote rule source fails to fetch, the last successful ruleset is retained; if the first fetch fails, that source is empty until the next cycle
+- Background refresh of expired hot keys is not deduplicated while an upstream keeps failing (it is self-healing and stops once the upstream recovers)

@@ -1,5 +1,5 @@
-/// 按权重随机抽取索引。roll ∈ [0,1) 由调用方提供以便确定性测试。
-/// 权重总和为 0（或全部非有限）时退化为均匀抽取；空切片返回 None。
+/// Randomly picks an index by weight. `roll` ∈ [0,1) is supplied by the caller to allow deterministic tests.
+/// When the weights sum to 0 (or none are finite), it degrades to a uniform pick; an empty slice returns None.
 pub fn pick_weighted(weights: &[f64], roll: f64) -> Option<usize> {
     if weights.is_empty() {
         return None;
@@ -19,7 +19,7 @@ pub fn pick_weighted(weights: &[f64], roll: f64) -> Option<usize> {
             }
         }
     }
-    // 浮点边界兜底：返回最后一个正权重索引
+    // Floating-point boundary fallback: return the last positive-weight index
     weights.iter().rposition(|w| w.is_finite() && *w > 0.0)
 }
 
@@ -40,7 +40,7 @@ mod tests {
 
     #[test]
     fn roll_lands_proportionally() {
-        // weights [1.0, 3.0] → 边界 0.25
+        // weights [1.0, 3.0] → boundary 0.25
         let w = [1.0, 3.0];
         assert_eq!(pick_weighted(&w, 0.10), Some(0));
         assert_eq!(pick_weighted(&w, 0.24), Some(0));
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn statistical_bias_holds() {
-        // 用固定步长扫 roll，验证高权重上游被选中次数显著更多
+        // Sweep roll with a fixed step to verify the higher-weight upstream is chosen far more often
         let w = [1.0, 9.0];
         let mut counts = [0usize; 2];
         for i in 0..1000 {
@@ -67,13 +67,13 @@ mod tests {
         }
         assert!(
             counts[1] > counts[0] * 5,
-            "9:1 权重应显著偏向索引 1: {counts:?}"
+            "9:1 weight should strongly favor index 1: {counts:?}"
         );
     }
 
     #[test]
     fn skips_nonfinite_and_negative_weights() {
-        // NaN、负数、无穷都应被跳过：只有索引 1、3 是有效正权重
+        // NaN, negative, and infinite values should all be skipped: only indices 1 and 3 are valid positive weights
         let w = [f64::NAN, 1.0, -5.0, 3.0, f64::INFINITY];
         assert_eq!(pick_weighted(&w, 0.10), Some(1)); // 0.10*4=0.4 < 1.0
         assert_eq!(pick_weighted(&w, 0.30), Some(3)); // 0.30*4=1.2 ≥ 1.0
@@ -87,14 +87,14 @@ mod tests {
 
     #[test]
     fn extreme_roll_hits_last_positive_fallback_safely() {
-        // roll 极接近 1 且权重量级悬殊，确保不 panic 且返回有效正权重索引
+        // roll very close to 1 with wildly differing weight magnitudes; ensure no panic and a valid positive-weight index is returned
         let w = [1e-300, 1e300, 0.0];
         let idx = pick_weighted(&w, 0.999_999_999_999_999_9).unwrap();
         assert!(
             idx == 0 || idx == 1,
             "must land on a positive-weight index: {idx}"
         );
-        // 边界值 roll 恰好等于第一权重占比时落入下一桶（严格 < 语义）
+        // Boundary case: when roll exactly equals the first weight's share it falls into the next bucket (strict < semantics)
         let w2 = [1.0, 3.0];
         assert_eq!(pick_weighted(&w2, 0.25), Some(1));
     }

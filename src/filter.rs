@@ -20,7 +20,7 @@ fn valid_domain(s: &str) -> bool {
     !s.is_empty() && !s.contains(['/', '*', '$', '|', '^', ' ', '\t']) && s.contains('.')
 }
 
-/// 编译后的规则集：屏蔽域集合 + 例外域集合（都按后缀匹配语义使用）。
+/// Compiled rule set: a set of blocked domains + a set of exception domains (both used with suffix-match semantics).
 #[derive(Default)]
 pub struct RuleSet {
     blocked: HashSet<String>,
@@ -38,7 +38,7 @@ impl RuleSet {
     }
 }
 
-/// 解析 adblock 子集 + hosts 语法 + 纯域名行；不认识的行跳过。
+/// Parse an adblock subset + hosts syntax + plain domain lines; unrecognized lines are skipped.
 pub fn parse_rules(text: &str) -> RuleSet {
     let mut set = RuleSet::default();
     for raw in text.lines() {
@@ -46,7 +46,7 @@ pub fn parse_rules(text: &str) -> RuleSet {
         if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
             continue;
         }
-        // @@||domain^ 例外
+        // @@||domain^ exception
         if let Some(rest) = line.strip_prefix("@@||") {
             let domain = rest.split(['^', '$']).next().unwrap_or("");
             let domain = normalize(domain);
@@ -55,7 +55,7 @@ pub fn parse_rules(text: &str) -> RuleSet {
             }
             continue;
         }
-        // ||domain^ 屏蔽
+        // ||domain^ block
         if let Some(rest) = line.strip_prefix("||") {
             let domain = rest.split(['^', '$']).next().unwrap_or("");
             let domain = normalize(domain);
@@ -64,7 +64,7 @@ pub fn parse_rules(text: &str) -> RuleSet {
             }
             continue;
         }
-        // hosts 语法：IP + 空白 + 域名（行内 # 注释截断）
+        // hosts syntax: IP + whitespace + domain (an inline # comment truncates the line)
         let line = line.split('#').next().unwrap_or("").trim();
         let mut parts = line.split_whitespace();
         match (parts.next(), parts.next()) {
@@ -75,7 +75,7 @@ pub fn parse_rules(text: &str) -> RuleSet {
                 }
             }
             (Some(first), None) => {
-                // 纯域名行
+                // plain domain line
                 let domain = normalize(first);
                 if valid_domain(&domain) {
                     set.blocked.insert(domain);
@@ -87,7 +87,7 @@ pub fn parse_rules(text: &str) -> RuleSet {
     set
 }
 
-/// 广告屏蔽器：ArcSwap 热替换规则集 + 配置豁免；读路径无锁。
+/// Ad blocker: ArcSwap hot-swappable rule set + configured exemptions; the read path is lock-free.
 pub struct Filter {
     rules: ArcSwap<RuleSet>,
     allowlist: HashSet<String>,
@@ -105,7 +105,7 @@ impl Filter {
         self.rules.store(Arc::new(rules));
     }
 
-    /// 后缀游走匹配；豁免（allowlist/例外）优先。
+    /// Suffix-walking match; exemptions (allowlist/exceptions) take priority.
     pub fn is_blocked(&self, name: &str) -> bool {
         let name = normalize(name);
         let rules = self.rules.load();
@@ -131,7 +131,7 @@ impl Filter {
         }
     }
 
-    /// 屏蔽应答：A→0.0.0.0，AAAA→::，其他→NODATA。
+    /// Block response: A→0.0.0.0, AAAA→::, others→NODATA.
     pub fn block_response(&self, query: &Message) -> Message {
         let mut resp = Message::new(
             query.metadata.id,
@@ -166,7 +166,7 @@ impl Filter {
     }
 }
 
-/// 加载全部规则源（本地 path / 远程 url），单源失败 warn 跳过。
+/// Load all rule sources (local path / remote url); a single failing source is warned and skipped.
 pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> RuleSet {
     let mut merged = RuleSet::default();
     for s in sources {
@@ -206,7 +206,7 @@ pub async fn load_sources(sources: &[RuleSource], bootstrap: &Bootstrap) -> Rule
     merged
 }
 
-/// 有定时 url 源时启动后台刷新：按最小合法周期整体重拉并热替换。
+/// Start a background refresh when there are scheduled url sources: re-fetch everything at the smallest valid interval and hot-swap.
 pub fn spawn_updater(filter: Arc<Filter>, sources: Vec<RuleSource>, bootstrap: Arc<Bootstrap>) {
     let mut min_interval: Option<Duration> = None;
     for s in &sources {
@@ -226,7 +226,7 @@ pub fn spawn_updater(filter: Arc<Filter>, sources: Vec<RuleSource>, bootstrap: A
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // 首个 tick 立即完成，跳过（启动时已加载）
+        ticker.tick().await; // the first tick completes immediately, skip it (already loaded at startup)
         loop {
             ticker.tick().await;
             let rules = load_sources(&sources, &bootstrap).await;
@@ -273,7 +273,7 @@ plain-blocked.dev
         let f = filter_with(&[]);
         for d in [
             "ads.example.com",
-            "sub.ads.example.com", // 后缀匹配
+            "sub.ads.example.com", // suffix match
             "tracker.net",
             "hosts-blocked.com",
             "also-blocked.org",
@@ -358,7 +358,7 @@ plain-blocked.dev
             },
             crate::config::RuleSource {
                 path: None,
-                url: Some(format!("http://{addr}/missing")), // 失败源仅 warn 跳过
+                url: Some(format!("http://{addr}/missing")), // a failing source is only warned and skipped
                 update_interval: None,
             },
         ];
