@@ -50,22 +50,15 @@ dnsbuffer --config /etc/dnsbuffer/config.toml
 docker pull ghcr.io/kagamir/dnsbuffer:latest
 ```
 
-镜像基于 distroless（无 shell，仅含运行所需的 glibc），内置一份示例配置在 `/etc/dnsbuffer/config.toml`。生产环境请挂载自己的配置覆盖它：
-
 ```bash
 docker run -d --name dnsbuffer \
   --restart unless-stopped \
   -p 53:53/udp \
   -p 8080:8080/tcp \
-  -v /etc/dnsbuffer/config.toml:/etc/dnsbuffer/config.toml:ro \
-  -v /var/lib/dnsbuffer:/var/lib/dnsbuffer \
+  -v $(pwd)/config.toml:/opt/dnsbuffer/config.toml:ro \
+  -v $(pwd)/data/:/opt/dnsbuffer/data/ \
   ghcr.io/kagamir/dnsbuffer:latest
 ```
-
-- 配置中 `listen` 需为 `0.0.0.0:53`（容器内监听全部网卡），宿主侧用 `-p` 映射端口
-- 仅挂载 `/var/lib/dnsbuffer` 不会自动改变数据库位置；挂载的配置还必须显式设置 `[dashboard] database_path = "/var/lib/dnsbuffer/dnsbuffer.db"`，SQLite 才会持久化到该卷。内置配置使用相对路径 `dnsbuffer.db`，其位置取决于容器工作目录，不保证落在挂载卷中
-- 本 Dockerfile 没有覆盖基础镜像的 `USER`；挂载的 `/var/lib/dnsbuffer` 必须对镜像的实际运行用户可写，否则 SQLite 初始化失败会阻止程序启动
-- 临时调试可加 `-e RUST_LOG=debug`
 - 若挂载了远程规则源的本地文件（`[[adblock.rule_source]] path = ...`），一并 `-v` 进容器
 - 可用标签：`latest`、`vX.Y.Z`、`X.Y`（如 `v0.1.0`、`0.1`）
 
@@ -85,7 +78,7 @@ level = "info"               # error | warn | info | debug | trace；RUST_LOG �
 
 [dashboard]
 listen = "0.0.0.0:8080"      # 无认证；仅暴露到可信网络，或使用带认证的反向代理
-database_path = "dnsbuffer.db" # 相对路径以进程工作目录为基准；初始化失败将阻止程序启动
+database_path = "data/dnsbuffer.db" # 相对路径以进程工作目录为基准；目录须已存在，初始化失败将阻止程序启动
 retention_days = 7            # 允许 0-9999；0 表示永久保留
 
 [cache]

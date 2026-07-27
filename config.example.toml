@@ -11,7 +11,7 @@ level = "info"           # error | warn | info | debug | trace；RUST_LOG 环境
 
 [dashboard]
 listen = "0.0.0.0:8080"       # 无认证；仅暴露到可信网络，或使用带认证的反向代理
-database_path = "dnsbuffer.db" # 相对路径以进程工作目录为基准；初始化失败将阻止程序启动
+database_path = "data/dnsbuffer.db" # 相对路径以进程工作目录为基准；初始化失败将阻止程序启动
 retention_days = 7              # 允许 0-9999；0 永久保留；1-15 天按小时趋势，16+ 天按天，0 显示最近 30 个日桶
 
 [cache]

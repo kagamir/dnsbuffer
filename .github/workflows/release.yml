@@ -17,8 +17,8 @@ env:
 
 jobs:
   # ── 每个架构在自己的原生 runner 上编译 ──────────────────────────────
-  # 用 22.04（glibc 2.35）而非 24.04，保证二进制能跑在 distroless/cc-debian12
-  # （glibc 2.36）以及更广的旧发行版上（glibc 只向后兼容）。
+  # 目标为 musl 静态链接：产物不依赖任何系统 libc，可直接放进 alpine 镜像，
+  # 也能跑在任意 Linux 发行版上（build 主机的 glibc 版本不再影响兼容性）。
   build:
     name: build ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -28,18 +28,19 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
           - arch: arm64
             runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
 
-      # aws-lc-rs 的构建脚本需要 C 编译器与 cmake
+      # aws-lc-rs 的构建脚本需要 C 编译器与 cmake；musl-tools 提供
+      # musl-gcc（各 runner 原生架构对应的 musl 交叉编译包装器）
       - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake
+          sudo apt-get install -y --no-install-recommends cmake musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,6 +54,12 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          # cc/cmake 构建脚本（aws-lc-sys 等）交叉编译 musl 目标时使用 musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
       - name: Resolve version
         id: ver
