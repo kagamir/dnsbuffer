@@ -843,8 +843,6 @@ async fn serves_embedded_assets_and_method_errors() {
     let index = text(index).await;
     for marker in [
         "id=\"trend\"",
-        "id=\"cache\"",
-        "id=\"cache-chart\"",
         "id=\"rankings\"",
         "id=\"upstreams\"",
         "id=\"queries\"",
@@ -875,7 +873,7 @@ async fn serves_embedded_assets_and_method_errors() {
     assert!(
         text(chart)
             .await
-            .starts_with("/* dnsbuffer chart module v1.1.0 */")
+            .starts_with("/* dnsbuffer chart module v1.2.0 */")
     );
 
     let post = app

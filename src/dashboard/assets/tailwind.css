@@ -1,0 +1,550 @@
+/*
+ * Tailwind input for the dnsbuffer dashboard.
+ *
+ * Build (dev-time only — never runs in CI or Docker):
+ *   npm run build:css     # one-shot, minified -> style.css
+ *   npm run watch:css     # rebuild on change
+ *
+ * The generated ./style.css is committed to the repo and embedded into the
+ * Rust binary via include_str!, so the runtime stays a self-contained,
+ * offline, zero-dependency static asset.
+ *
+ * Components below follow shadcn/ui conventions (Card, Button, Badge, Table,
+ * Input, stat cards) so the dashboard reads as an authentic shadcn surface.
+ */
+@import "tailwindcss";
+
+@source "./index.html";
+@source "./app.js";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ── shadcn-style design tokens ─────────────────────────────────────────── */
+:root {
+  --radius: 0.625rem;
+
+  --background: #f5f6f8;
+  --foreground: #0a0e14;
+  --card: #ffffff;
+  --card-foreground: #0a0e14;
+  --popover: #ffffff;
+  --popover-foreground: #0a0e14;
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #eef1f5;
+  --secondary-foreground: #0f172a;
+  --muted: #eef1f5;
+  --muted-foreground: #5b6675;
+  --accent: #eef1f5;
+  --accent-foreground: #0f172a;
+  --destructive: #dc2626;
+  --border: #e2e6ec;
+  --input: #e2e6ec;
+  --ring: #0d9488;
+
+  /* Data-viz / status palette (also rendered on <canvas>) */
+  --chart-total: #0d9488;
+  --chart-blocked: #dc2626;
+  --chart-cache: #b45309;
+  --chart-grid: #e2e6ec;
+  --chart-axis: #5b6675;
+  --chart-fg: #0a0e14;
+  --chart-neutral: #2563eb;
+  --chart-success: #16a34a;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-border: #d5dae2;
+}
+
+.dark {
+  --background: #080b12;
+  --foreground: #e8edf6;
+  --card: #101621;
+  --card-foreground: #e8edf6;
+  --popover: #0c1119;
+  --popover-foreground: #e8edf6;
+  --primary: #5eead4;
+  --primary-foreground: #04211d;
+  --secondary: #1a2333;
+  --secondary-foreground: #e8edf6;
+  --muted: #141c29;
+  --muted-foreground: #8793a8;
+  --accent: #1a2333;
+  --accent-foreground: #e8edf6;
+  --destructive: #fb7185;
+  --border: #253047;
+  --input: #2b3852;
+  --ring: #5eead4;
+
+  --chart-total: #5eead4;
+  --chart-blocked: #fb7185;
+  --chart-cache: #fbbf24;
+  --chart-grid: #253047;
+  --chart-axis: #8793a8;
+  --chart-fg: #e8edf6;
+  --chart-neutral: #93c5fd;
+  --chart-success: #4ade80;
+  --chart-tooltip-bg: #0c1119;
+  --chart-tooltip-border: #253047;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: Inter, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    margin: 0;
+    min-width: 320px;
+  }
+  h1,
+  h2,
+  h3,
+  p {
+    margin: 0;
+  }
+  /* A <canvas> carries an intrinsic width from its `width` attribute (set by the
+     chart code to dpr * cssWidth). Without this it imposes that pixel width as a
+     minimum on its grid/flex track and blows the layout wider than the viewport. */
+  canvas {
+    max-width: 100%;
+    min-width: 0;
+  }
+}
+
+/* ── Components ─────────────────────────────────────────────────────────── */
+@layer components {
+  /* Centered page shell (plain CSS: calc() arbitrary values don't survive
+     Tailwind's class extraction reliably). */
+  .shell {
+    width: min(1440px, calc(100% - 2rem));
+    margin-inline: auto;
+  }
+
+  /* Card ------------------------------------------------------------------ */
+  .panel {
+    @apply min-w-0 rounded-xl border border-border bg-card text-card-foreground shadow-sm;
+    padding: 1.5rem;
+  }
+  .panel-heading,
+  .query-heading {
+    @apply grid gap-4 md:flex md:items-start md:justify-between;
+  }
+  .query-heading {
+    @apply md:items-end;
+  }
+  .card-kicker {
+    @apply text-[11px] font-semibold uppercase tracking-[0.1em] text-muted-foreground;
+  }
+  .card-title {
+    @apply mt-1.5 text-base font-semibold leading-none tracking-tight text-card-foreground;
+  }
+  .card-description {
+    @apply mt-2 text-sm text-muted-foreground;
+  }
+
+  /* Stat / KPI card ------------------------------------------------------- */
+  .stat-card {
+    @apply flex min-w-0 flex-col rounded-xl border border-border bg-card text-card-foreground shadow-sm;
+    padding: 1.25rem 1.5rem;
+  }
+  .stat-head {
+    @apply flex items-center justify-between gap-2;
+  }
+  .stat-label {
+    @apply text-sm font-medium text-muted-foreground;
+  }
+  .stat-value {
+    @apply mt-2 text-3xl font-semibold leading-none tracking-tight tabular-nums;
+  }
+  .stat-desc {
+    @apply mt-2 text-xs text-muted-foreground;
+  }
+  #avg-response-value.has-error {
+    color: var(--destructive);
+  }
+
+  /* Button ---------------------------------------------------------------- */
+  .btn {
+    @apply inline-flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md px-4 text-sm font-medium transition-colors outline-none;
+    @apply focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40;
+    @apply disabled:pointer-events-none disabled:opacity-50;
+    border: 1px solid transparent;
+    cursor: pointer;
+  }
+  .btn svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+  }
+  .btn-default {
+    @apply bg-primary text-primary-foreground shadow-xs;
+  }
+  .btn-default:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--primary) 90%, black);
+  }
+  .btn-outline {
+    @apply border-border bg-card shadow-xs;
+  }
+  .btn-outline:hover:not(:disabled) {
+    @apply bg-accent text-accent-foreground;
+  }
+  .btn-ghost:hover:not(:disabled) {
+    @apply bg-accent text-accent-foreground;
+  }
+  .btn-icon {
+    @apply w-9 px-0;
+  }
+
+  /* Theme toggle icon swap */
+  .theme-toggle .icon-sun {
+    display: none;
+  }
+  .theme-toggle .icon-moon {
+    display: block;
+  }
+  html.dark .theme-toggle .icon-sun {
+    display: block;
+  }
+  html.dark .theme-toggle .icon-moon {
+    display: none;
+  }
+
+  /* Badge ----------------------------------------------------------------- */
+  .badge {
+    @apply inline-flex w-fit items-center justify-center gap-1.5 whitespace-nowrap rounded-md border px-2 py-0.5 text-xs font-medium;
+    border-color: transparent;
+  }
+  /* Soft status badges with a leading dot (shadcn status style) */
+  .badge-good,
+  .badge-warn,
+  .badge-bad,
+  .badge-blocked,
+  .badge-cache,
+  .badge-success {
+    border-color: color-mix(in srgb, currentColor 22%, transparent);
+    background: color-mix(in srgb, currentColor 12%, transparent);
+  }
+  .badge-good::before,
+  .badge-warn::before,
+  .badge-bad::before,
+  .badge-blocked::before,
+  .badge-cache::before,
+  .badge-success::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+  .badge-good {
+    color: var(--chart-total);
+  }
+  .badge-success {
+    color: var(--chart-success);
+  }
+  .badge-warn,
+  .badge-bad,
+  .badge-blocked {
+    color: var(--destructive);
+  }
+  .badge-cache {
+    color: var(--chart-cache);
+  }
+  .badge-neutral {
+    @apply text-foreground;
+    border-color: var(--border);
+    background: transparent;
+  }
+  .badge-outline {
+    @apply text-muted-foreground;
+    border-color: var(--border);
+    background: transparent;
+  }
+
+  /* Legend (trend chart) -------------------------------------------------- */
+  .legend {
+    @apply flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground max-md:w-full max-md:justify-between max-md:gap-2;
+  }
+  .legend span {
+    @apply flex items-center gap-1.5;
+  }
+  .legend i {
+    @apply inline-block h-[3px] w-[17px] rounded-[2px];
+  }
+  .legend-total {
+    background: var(--chart-total);
+  }
+  .legend-blocked {
+    background: repeating-linear-gradient(90deg, var(--chart-blocked) 0 7px, transparent 7px 11px);
+  }
+  .legend-cache {
+    background: repeating-linear-gradient(90deg, var(--chart-cache) 0 2px, transparent 2px 5px);
+  }
+
+  /* Live refresh status --------------------------------------------------- */
+  .live-status {
+    @apply flex items-center gap-2 text-xs text-muted-foreground;
+  }
+  .status-dot {
+    @apply h-2 w-2 rounded-full;
+    border: 2px solid var(--primary);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent);
+  }
+  .status-dot.is-loading {
+    border-color: var(--chart-cache);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--chart-cache) 16%, transparent);
+    animation: pulse 1s ease-in-out infinite;
+  }
+  .status-dot.has-error {
+    border-color: var(--destructive);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--destructive) 16%, transparent);
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* Upstream cards -------------------------------------------------------- */
+  .upstream-list {
+    @apply mt-4 grid gap-3;
+  }
+  .upstream-card {
+    @apply rounded-lg border border-border p-4;
+    background: color-mix(in srgb, var(--muted) 40%, transparent);
+  }
+  .upstream-heading {
+    @apply flex items-start justify-between gap-3;
+  }
+  .upstream-heading strong {
+    @apply text-sm font-semibold;
+    display: block;
+    overflow-wrap: anywhere;
+  }
+  .upstream-heading .muted {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+  .metrics {
+    @apply mt-4 grid gap-3;
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .metrics div {
+    @apply min-w-0;
+  }
+  .metrics dt {
+    @apply text-xs text-muted-foreground;
+  }
+  .metrics dd {
+    @apply mt-1 font-mono text-sm font-medium tabular-nums;
+  }
+
+  /* Inline per-panel error banner ---------------------------------------- */
+  .panel-error {
+    @apply hidden mt-4 rounded-md border px-3 py-2 text-xs;
+    border-color: color-mix(in srgb, var(--destructive) 30%, transparent);
+    color: var(--destructive);
+    background: color-mix(in srgb, var(--destructive) 8%, transparent);
+  }
+  .panel-error.is-visible {
+    @apply block;
+  }
+
+  /* Table ----------------------------------------------------------------- */
+  .table-scroll {
+    @apply mt-4 overflow-x-auto;
+  }
+  table {
+    @apply w-full text-sm;
+    border-collapse: collapse;
+  }
+  th {
+    @apply h-10 px-3 text-left align-middle text-xs font-medium text-muted-foreground;
+    white-space: nowrap;
+  }
+  td {
+    @apply px-3 py-2.5 align-middle;
+    border-top: 1px solid var(--border);
+  }
+  tbody tr {
+    transition: background-color 0.12s ease;
+  }
+  tbody tr:hover {
+    background: color-mix(in srgb, var(--muted) 55%, transparent);
+  }
+  .rank {
+    @apply mr-2 inline-block font-mono text-xs text-muted-foreground tabular-nums;
+    min-width: 22px;
+  }
+  .query-table {
+    min-width: 900px;
+  }
+  .query-table td:first-child {
+    @apply font-mono text-muted-foreground tabular-nums;
+    white-space: nowrap;
+  }
+  .query-table code {
+    @apply mb-1 block w-fit rounded bg-muted px-1.5 py-0.5 font-mono text-[11px];
+    color: var(--chart-neutral);
+  }
+  .result-cell {
+    @apply flex flex-wrap gap-1.5;
+  }
+
+  /* Domain rankings: cap the list so its height is max(10 rows, the Upstream
+     status panel next to it) and scroll the overflow. The panel is stretched to
+     the grid row height (equal-height columns); the scroll area grows to fill it
+     but never shrinks below ~10 rows. The header stays pinned while scrolling. */
+  /* Outer sets the visible height = max(~10 rows, remaining panel height). It
+     flex-grows to fill the panel (stretched to the taller Upstream panel via the
+     equal-height grid) but never below ~10 rows. */
+  .rankings-scroll {
+    @apply relative mt-4 flex-1;
+    min-height: 28rem;
+  }
+  /* Inner is absolutely positioned so the (potentially long) list scrolls
+     without contributing its height to the panel — that's what caps the panel
+     instead of letting the list stretch the whole grid row. */
+  .rankings-scroll-inner {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    /* Auto-hiding scrollbar: fades in on hover/scroll. The thumb keeps the same
+       grey RGB and only animates its alpha (0 -> 0.45) so the fade never passes
+       through the dark low-alpha state you get when animating from `transparent`
+       (which is transparent *black*). */
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  .rankings-scroll-inner:hover,
+  .rankings-scroll-inner:focus-within {
+    scrollbar-color: color-mix(in srgb, var(--muted-foreground) 45%, transparent) transparent;
+  }
+  .rankings-scroll-inner::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .rankings-scroll-inner::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .rankings-scroll-inner::-webkit-scrollbar-thumb {
+    background: transparent; /* fallback for browsers without relative color syntax */
+    background: rgb(from var(--muted-foreground) r g b / 0);
+    border-radius: 9999px;
+    transition: background-color 0.2s ease;
+  }
+  .rankings-scroll-inner:hover::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted-foreground) 45%, transparent); /* fallback */
+    background: rgb(from var(--muted-foreground) r g b / 0.45);
+  }
+  #rankings thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--card);
+  }
+
+  /* Form controls --------------------------------------------------------- */
+  .search-label {
+    @apply text-xs font-medium text-muted-foreground w-[min(390px,45%)] max-md:w-full;
+  }
+  .search-label span {
+    @apply mb-2 block;
+  }
+  input {
+    @apply h-9 w-full rounded-md border bg-transparent px-3 text-sm shadow-xs outline-none transition-colors;
+    @apply placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40;
+    border-color: var(--input);
+    color: var(--foreground);
+  }
+  .select {
+    @apply h-8 rounded-md border px-2 text-xs font-medium shadow-xs outline-none transition-colors;
+    @apply focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/40;
+    border-color: var(--input);
+    background: var(--card);
+    color: var(--foreground);
+    cursor: pointer;
+  }
+
+  /* Misc ------------------------------------------------------------------ */
+  .muted {
+    @apply text-sm text-muted-foreground;
+  }
+  .block {
+    @apply mt-0.5 block;
+  }
+  .empty {
+    @apply text-center text-sm text-muted-foreground;
+    padding: 2rem 0.5rem;
+  }
+  .pagination {
+    @apply flex flex-wrap items-center justify-between gap-3 pt-4 text-xs text-muted-foreground;
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+/* On narrow screens clamp the (potentially long) refresh status text so the
+   header never forces the page wider than the viewport. */
+@media (max-width: 767px) {
+  .live-status span:last-child {
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    animation: none !important;
+  }
+}

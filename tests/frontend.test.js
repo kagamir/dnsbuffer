@@ -164,6 +164,32 @@ test("hover tooltip lists the three series values in legend order and colors", (
   assert.deepEqual(chart.tooltipRows(undefined).map((row) => row.value), [0, 0, 0]);
 });
 
+test("cache bars model current entries and hit rate against their own axes", () => {
+  const model = chart.cacheBars({
+    current_entries: 640,
+    max_entries: 1000,
+    current: { hit_rate: 0.732 }
+  });
+  assert.equal(model.countAxisMax, 1000, "count axis stretches to a nearby configured capacity");
+  assert.equal(model.hasRate, true);
+  const [count, rate] = model.bars;
+  assert.deepEqual([count.label, count.display], ["Entries", "640"]);
+  assert.equal(count.ratio, 0.64, "count bar fills relative to the configured capacity");
+  assert.deepEqual([rate.label, rate.display], ["Hit rate", "73.2%"]);
+  assert.equal(rate.ratio, 0.732);
+});
+
+test("cache bars degrade gracefully with no observation and clamp the hit rate", () => {
+  const empty = chart.cacheBars({ current_entries: 0, max_entries: 500, current: null });
+  assert.equal(empty.hasRate, false);
+  assert.deepEqual(empty.bars.map((bar) => bar.display), ["0", "--"]);
+  assert.equal(empty.bars[1].ratio, 0);
+
+  const clamped = chart.cacheBars({ current_entries: 12, max_entries: 100, current: { hit_rate: 1.4 } });
+  assert.equal(clamped.bars[1].ratio, 1, "an out-of-range hit rate is clamped to 100%");
+  assert.equal(clamped.bars[1].display, "100.0%");
+});
+
 test("cache curve axis follows observations and only stretches to a nearby configured capacity", () => {
   const points = [
     { size: 120, hit_rate: 0.4 },

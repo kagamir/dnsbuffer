@@ -1,0 +1,15 @@
+{
+  "name": "dnsbuffer-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build tooling for the dnsbuffer operations dashboard (TailwindCSS). The compiled src/dashboard/assets/style.css is committed and embedded into the Rust binary via include_str!, so this toolchain only runs at development time — never in CI or the Docker build.",
+  "scripts": {
+    "build:css": "tailwindcss -i ./src/dashboard/assets/tailwind.css -o ./src/dashboard/assets/style.css --minify",
+    "watch:css": "tailwindcss -i ./src/dashboard/assets/tailwind.css -o ./src/dashboard/assets/style.css --watch",
+    "test": "node --test tests/*.test.js"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "tailwindcss": "^4.1.0"
+  }
+}

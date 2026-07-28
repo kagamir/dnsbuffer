@@ -4,26 +4,69 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>dnsbuffer Operations Dashboard</title>
+  <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#080b12" media="(prefers-color-scheme: dark)">
+  <script>
+    // Apply the saved (or system) theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var stored = localStorage.getItem("dnsbuffer-theme");
+        var dark = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch (error) { /* private mode / no storage: fall back to light */ }
+    })();
+  </script>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
-  <header class="site-header">
+  <header class="site-header shell flex min-h-[76px] items-center justify-between gap-4 border-b border-border md:min-h-[92px]">
     <div>
-      <p class="eyebrow">DNS OPERATIONS</p>
-      <h1>dnsbuffer</h1>
+      <p class="card-kicker">DNS Operations</p>
+      <h1 class="mt-1 font-mono text-2xl font-bold tracking-tight">dnsbuffer</h1>
     </div>
-    <div class="refresh-meta">
-      <div class="live-status"><span class="status-dot" aria-hidden="true"></span><span id="refresh-status">Loading</span></div>
-      <span id="last-updated">Not yet updated</span>
-      <button id="refresh-button" type="button">Refresh data</button>
+    <div class="flex items-center gap-3">
+      <div class="hidden text-right sm:grid">
+        <div class="live-status justify-end"><span class="status-dot" aria-hidden="true"></span><span id="refresh-status">Loading</span></div>
+        <span id="last-updated" class="mt-1 text-[11px] text-muted-foreground">Not yet updated</span>
+      </div>
+      <button id="theme-toggle" type="button" class="btn btn-ghost btn-icon theme-toggle" aria-label="Toggle light/dark theme" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+      </button>
+      <button id="refresh-button" type="button" class="btn btn-default">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>
+        Refresh data
+      </button>
     </div>
   </header>
 
-  <main>
-    <div class="overview-grid">
-      <section id="trend" class="panel trend-panel" aria-labelledby="trend-title">
+  <main class="shell grid gap-3.5 pb-10 pt-4 md:pt-6">
+    <div class="grid min-w-0 gap-3.5 sm:grid-cols-2 lg:grid-cols-4">
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Total queries</span></div>
+        <strong id="stat-total-value" class="stat-value">--</strong>
+        <span id="stat-total-desc" class="stat-desc">Waiting for data</span>
+      </div>
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Blocked</span><span id="stat-blocked-badge" class="badge badge-outline">--</span></div>
+        <strong id="stat-blocked-value" class="stat-value">--</strong>
+        <span id="stat-blocked-desc" class="stat-desc">Filtered by adblock</span>
+      </div>
+      <div class="stat-card">
+        <div class="stat-head"><span class="stat-label">Cache hits</span><span id="stat-cache-badge" class="badge badge-outline">--</span></div>
+        <strong id="stat-cache-value" class="stat-value">--</strong>
+        <span id="stat-cache-desc" class="stat-desc">Served from cache</span>
+      </div>
+      <div id="response" class="stat-card">
+        <div class="stat-head"><span class="stat-label">Avg response</span></div>
+        <strong id="avg-response-value" class="stat-value" title="Average time from a request entering the service to returning a response">--</strong>
+        <span id="stat-response-desc" class="stat-desc">Time in service per request</span>
+      </div>
+    </div>
+
+    <section id="trend" class="panel trend-panel" aria-labelledby="trend-title">
         <div class="panel-heading">
-          <div><p class="section-index">01 / TRAFFIC</p><h2 id="trend-title">Query trend</h2><p id="trend-range" class="trend-range">Loading data range...</p></div>
+          <div><p class="card-kicker">01 / Traffic</p><h2 id="trend-title" class="card-title">Query trend</h2><p id="trend-range" class="card-description">Loading data range...</p></div>
           <div class="legend" aria-label="Chart legend">
             <span><i class="legend-total" aria-hidden="true"></i>All queries</span>
             <span><i class="legend-blocked" aria-hidden="true"></i>Blocked</span>
@@ -31,48 +74,36 @@
           </div>
         </div>
         <p class="panel-error" role="status" aria-live="polite"></p>
-        <canvas id="trend-chart" aria-label="Time trend of all queries, blocked queries, and cache hits" role="img"></canvas>
+        <canvas id="trend-chart" class="mt-4 block h-[230px] w-full md:h-[280px]" aria-label="Time trend of all queries, blocked queries, and cache hits" role="img"></canvas>
         <p id="trend-summary" class="sr-only">Query trend is loading</p>
-      </section>
+    </section>
 
-      <section id="cache" class="panel cache-panel" aria-labelledby="cache-title">
-        <div class="panel-heading">
-          <div><p class="section-index">02 / CACHE</p><h2 id="cache-title">Hit rate vs. cache size</h2><p id="cache-note" class="trend-range">Loading cache analysis...</p></div>
-        </div>
-        <p class="panel-error" role="status" aria-live="polite"></p>
-        <canvas id="cache-chart" aria-label="Projected hit rate curve across different cache capacities" role="img"></canvas>
-        <p id="cache-summary" class="sr-only">Cache hit rate curve is loading</p>
-      </section>
-    </div>
-
-    <div class="split-grid">
+    <div class="grid min-w-0 gap-3.5 md:grid-cols-[minmax(300px,0.8fr)_minmax(480px,1.2fr)]">
       <section id="upstreams" class="panel" aria-labelledby="upstream-title">
         <div class="panel-heading">
-          <div><p class="section-index">03 / NETWORK</p><h2 id="upstream-title">Upstream status</h2></div>
-          <div id="response" class="avg-response">
-            <span class="avg-response-label">Average response time</span>
-            <strong id="avg-response-value" title="Average time from a request entering the service to returning a response">--</strong>
-          </div>
+          <div><p class="card-kicker">02 / Network</p><h2 id="upstream-title" class="card-title">Upstream status</h2></div>
         </div>
         <p class="panel-error" role="status" aria-live="polite"></p>
         <div id="upstream-list" class="upstream-list"><p class="empty">Loading upstream data...</p></div>
       </section>
 
-      <section id="rankings" class="panel" aria-labelledby="ranking-title">
-        <div class="panel-heading"><div><p class="section-index">04 / DOMAINS</p><h2 id="ranking-title">Domain rankings</h2></div></div>
+      <section id="rankings" class="panel flex flex-col" aria-labelledby="ranking-title">
+        <div class="panel-heading"><div><p class="card-kicker">03 / Domains</p><h2 id="ranking-title" class="card-title">Domain rankings</h2></div></div>
         <p class="panel-error" role="status" aria-live="polite"></p>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th scope="col">Domain</th><th scope="col">Queries</th><th scope="col">Blocked</th><th scope="col">Cache</th></tr></thead>
-            <tbody id="ranking-body"><tr><td colspan="4" class="empty">Loading rankings...</td></tr></tbody>
-          </table>
+        <div class="rankings-scroll">
+          <div class="rankings-scroll-inner">
+            <table>
+              <thead><tr><th scope="col">Domain</th><th scope="col">Queries</th><th scope="col">Blocked</th><th scope="col">Cache</th></tr></thead>
+              <tbody id="ranking-body"><tr><td colspan="4" class="empty">Loading rankings...</td></tr></tbody>
+            </table>
+          </div>
         </div>
       </section>
     </div>
 
     <section id="queries" class="panel" aria-labelledby="query-title">
       <div class="query-heading">
-        <div><p class="section-index">05 / EVENT LOG</p><h2 id="query-title">Recent queries</h2></div>
+        <div><p class="card-kicker">04 / Event log</p><h2 id="query-title" class="card-title">Recent queries</h2></div>
         <label class="search-label" for="query-search"><span>Search by domain or response IP</span><input id="query-search" type="search" maxlength="253" autocomplete="off" placeholder="example.com / 1.1.1.1"></label>
       </div>
       <p class="panel-error" role="status" aria-live="polite"></p>
@@ -83,9 +114,34 @@
         </table>
       </div>
       <nav class="pagination" aria-label="Query record pagination">
-        <button id="previous-page" type="button">Previous</button>
-        <span id="page-status">Page 1</span>
-        <button id="next-page" type="button">Next</button>
+        <span id="record-count" class="text-xs text-muted-foreground">-- records</span>
+        <div class="flex items-center gap-4 max-md:w-full max-md:justify-between">
+          <label class="flex items-center gap-2 text-xs font-medium text-muted-foreground" for="page-size">
+            <span class="max-sm:hidden">Rows per page</span>
+            <select id="page-size" class="select">
+              <option value="10">10</option>
+              <option value="20">20</option>
+              <option value="30">30</option>
+              <option value="40">40</option>
+              <option value="50">50</option>
+            </select>
+          </label>
+          <span id="page-status" class="text-xs font-medium tabular-nums">Page 1 of 1</span>
+          <div class="flex items-center gap-1">
+            <button id="first-page" type="button" class="btn btn-outline btn-icon" aria-label="First page" title="First page">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m11 17-5-5 5-5"></path><path d="m18 17-5-5 5-5"></path></svg>
+            </button>
+            <button id="previous-page" type="button" class="btn btn-outline btn-icon" aria-label="Previous page" title="Previous page">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+            </button>
+            <button id="next-page" type="button" class="btn btn-outline btn-icon" aria-label="Next page" title="Next page">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+            </button>
+            <button id="last-page" type="button" class="btn btn-outline btn-icon" aria-label="Last page" title="Last page">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m13 17 5-5-5-5"></path><path d="m6 17 5-5-5-5"></path></svg>
+            </button>
+          </div>
+        </div>
       </nav>
     </section>
   </main>

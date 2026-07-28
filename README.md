@@ -27,6 +27,24 @@ cargo build --release
 # Artifact: target/release/dnsbuffer
 ```
 
+### Dashboard styles (frontend)
+
+The dashboard assets in `src/dashboard/assets/` are hand-written HTML/JS embedded
+into the binary via `include_str!`, so `cargo build` needs no Node toolchain and
+the runtime stays a self-contained, offline static asset.
+
+The stylesheet `style.css` is compiled from `tailwind.css` (TailwindCSS v4 with a
+shadcn-style, light/dark design system) and **committed to the repo**. Only edit
+`style.css` by rebuilding it — never by hand. After changing utility classes in
+`index.html`/`app.js` or tokens in `tailwind.css`, regenerate it:
+
+```bash
+npm install        # once, installs the dev-only Tailwind CLI
+npm run build:css  # regenerate src/dashboard/assets/style.css (minified)
+npm run watch:css  # or rebuild continuously while developing
+npm test           # run the dashboard's node:test suite
+```
+
 ## Running
 
 ```bash

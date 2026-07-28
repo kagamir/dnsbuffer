@@ -94,15 +94,18 @@
     if (start.started) return;
     start.started = true;
     const state = {
-      page: 1, pageSize: 50, search: "", controllers: new Map(),
+      page: 1, pageSize: 10, search: "", controllers: new Map(),
       queryLoading: false, totalPages: null, requestedPage: 1, trendData: null,
-      cacheData: null, queryRequestId: 0
+      queryRequestId: 0
     };
-    const regionNames = ["trend", "cache", "upstreams", "rankings", "queries", "response"];
+    const regionNames = ["trend", "upstreams", "rankings", "queries", "response"];
     const roundTracker = createRoundTracker(regionNames);
     const regions = Object.fromEntries(regionNames.map((name) => [name, document.querySelector(`#${name}`)]));
+    const firstButton = document.querySelector("#first-page");
     const previousButton = document.querySelector("#previous-page");
     const nextButton = document.querySelector("#next-page");
+    const lastButton = document.querySelector("#last-page");
+    const pageSizeSelect = document.querySelector("#page-size");
     const refreshButton = document.querySelector("#refresh-button");
 
     function element(tag, text, className) {
@@ -119,8 +122,10 @@
     }
     function updatePagination() {
       const controls = paginationControls(state.page, state.totalPages, state.queryLoading);
+      firstButton.disabled = !controls.previous;
       previousButton.disabled = !controls.previous;
       nextButton.disabled = !controls.next;
+      lastButton.disabled = !controls.next;
     }
     function setQueryLoading(loading) {
       state.queryLoading = loading;
@@ -189,22 +194,17 @@
         cache: sum.cache + window.DnsTrendChart.normalizeValue(bucket.cache_hits)
       }), { total: 0, blocked: 0, cache: 0 });
       document.querySelector("#trend-summary").textContent = `${aggregation}: ${window.DnsTrendChart.formatCount(totals.total)} queries, ${window.DnsTrendChart.formatCount(totals.blocked)} blocked, ${window.DnsTrendChart.formatCount(totals.cache)} cache hits`;
+      renderTrafficStats(totals, aggregation);
     }
-    function renderCache(data) {
-      const points = Array.isArray(data.points) ? data.points : [];
-      state.cacheData = data;
-      window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), data);
-      const format = window.DnsTrendChart.formatCount;
-      if (!points.length || !data.current) {
-        document.querySelector("#cache-note").textContent = "Collecting observations (one recorded per request)";
-        document.querySelector("#cache-summary").textContent = "No observations yet for the cache hit rate curve";
-        return;
-      }
-      const percent = `${(Math.min(1, Math.max(0, Number(data.current.hit_rate) || 0)) * 100).toFixed(1)}%`;
-      document.querySelector("#cache-note").textContent =
-        `${points.length} observations · current ${format(data.current_entries)} / ${format(data.max_entries)} entries · cumulative hit rate ${percent}`;
-      document.querySelector("#cache-summary").textContent =
-        `Recorded ${points.length} hit rate observations by cache entry count; current cache holds ${format(data.current_entries)} entries (configured limit ${format(data.max_entries)}), cumulative hit rate ${percent}`;
+    function renderTrafficStats(totals, aggregation) {
+      const fmt = window.DnsTrendChart.formatCount;
+      const share = (part) => (totals.total > 0 ? `${(part / totals.total * 100).toFixed(1)}%` : "--");
+      document.querySelector("#stat-total-value").textContent = fmt(totals.total);
+      document.querySelector("#stat-total-desc").textContent = aggregation;
+      document.querySelector("#stat-blocked-value").textContent = fmt(totals.blocked);
+      document.querySelector("#stat-blocked-badge").textContent = share(totals.blocked);
+      document.querySelector("#stat-cache-value").textContent = fmt(totals.cache);
+      document.querySelector("#stat-cache-badge").textContent = share(totals.cache);
     }
     function renderUpstreams(data) {
       const target = document.querySelector("#upstream-list");
@@ -226,6 +226,9 @@
     }
     function renderResponseTime(data) {
       document.querySelector("#avg-response-value").textContent = averageResponseText(data);
+      const samples = normalizeCount(data && data.samples);
+      document.querySelector("#stat-response-desc").textContent =
+        samples > 0 ? `Across ${window.DnsTrendChart.formatCount(samples)} samples` : "Time in service per request";
     }
     function reportResponseError(message) {
       document.querySelector("#avg-response-value").classList.toggle("has-error", Boolean(message));
@@ -255,7 +258,8 @@
         if (record.blocked) addBadge(result, "Blocked", "badge-blocked"); if (record.cache_hit) addBadge(result, "Cache", "badge-cache");
         row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, element("td", `${record.duration_ms} ms`), result); return row;
       }));
-      document.querySelector("#page-status").textContent = `Page ${state.page} / ${state.totalPages} · ${window.DnsTrendChart.formatCount(data.total)} records`;
+      document.querySelector("#page-status").textContent = `Page ${state.page} of ${state.totalPages}`;
+      document.querySelector("#record-count").textContent = `${window.DnsTrendChart.formatCount(data.total)} records`;
       updatePagination();
     }
     async function loadQueries(corrected, roundId) {
@@ -280,7 +284,6 @@
       beginRefreshStatus();
       const requests = [
         ["trend", loadRegion("trend", "/api/dashboard/trend", renderTrend)],
-        ["cache", loadRegion("cache", "/api/dashboard/cache-curve", renderCache)],
         ["upstreams", loadRegion("upstreams", "/api/dashboard/upstreams", renderUpstreams)],
         ["response", loadRegion("response", "/api/dashboard/response-time", renderResponseTime, reportResponseError)],
         ["rankings", loadRegion("rankings", "/api/dashboard/rankings", renderRankings)],
@@ -298,13 +301,40 @@
         Object.assign(state, searchDecision(value)); loadQueries(false);
       }, 300);
     });
+    firstButton.addEventListener("click", () => { if (!state.queryLoading && state.page > 1) { state.page = 1; loadQueries(false); } });
     previousButton.addEventListener("click", () => { if (!state.queryLoading && state.page > 1) { state.page -= 1; loadQueries(false); } });
     nextButton.addEventListener("click", () => { if (!state.queryLoading && (state.totalPages == null || state.page < state.totalPages)) { state.page += 1; loadQueries(false); } });
-    let resizeTimer;
-    window.addEventListener("resize", () => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => {
+    lastButton.addEventListener("click", () => { if (!state.queryLoading && state.totalPages != null && state.page < state.totalPages) { state.page = state.totalPages; loadQueries(false); } });
+    pageSizeSelect.addEventListener("change", (event) => {
+      const size = Number(event.target.value);
+      if (!Number.isFinite(size) || size < 1) return;
+      state.pageSize = size; state.page = 1; state.totalPages = null; loadQueries(false);
+    });
+    function rerenderCharts() {
       if (state.trendData) window.DnsTrendChart.render(document.querySelector("#trend-chart"), state.trendData.buckets, state.trendData.granularity);
-      if (state.cacheData) window.DnsTrendChart.renderCacheCurve(document.querySelector("#cache-chart"), state.cacheData);
-    }, 120); });
+    }
+    let resizeTimer;
+    window.addEventListener("resize", () => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(rerenderCharts, 120); });
+
+    // Light/dark theme: toggle the `.dark` class on <html>, persist the choice,
+    // and repaint the canvas charts so they pick up the new theme colors.
+    function applyTheme(dark) {
+      document.documentElement.classList.toggle("dark", dark);
+      rerenderCharts();
+    }
+    const themeToggle = document.querySelector("#theme-toggle");
+    if (themeToggle) themeToggle.addEventListener("click", () => {
+      const dark = !document.documentElement.classList.contains("dark");
+      try { window.localStorage.setItem("dnsbuffer-theme", dark ? "dark" : "light"); } catch (error) { /* storage unavailable */ }
+      applyTheme(dark);
+    });
+    const media = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+    if (media) media.addEventListener("change", (event) => {
+      let stored = null;
+      try { stored = window.localStorage.getItem("dnsbuffer-theme"); } catch (error) { /* storage unavailable */ }
+      if (!stored) applyTheme(event.matches);
+    });
+
     // Manual refresh: no periodic polling; the server only computes each section's stats when the user clicks, reducing server load
     refreshButton.addEventListener("click", refreshAll);
     updatePagination(); refreshAll();

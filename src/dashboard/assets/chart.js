@@ -1,4 +1,4 @@
-/* dnsbuffer chart module v1.1.0 */
+/* dnsbuffer chart module v1.2.0 */
 (function (root, factory) {
   "use strict";
   const api = factory();
@@ -7,6 +7,10 @@
 }(typeof window !== "undefined" ? window : globalThis, function () {
   "use strict";
 
+  /* Static series colors double as the light-pattern contract and the dark-theme
+     fallback; the actual stroke/fill colors are resolved per-theme at draw time
+     (see readColors / seriesColor). Keeping these stable preserves tooltipRows'
+     data contract for the unit tests. */
   const series = [
     { key: "total_queries", label: "All queries", color: "#5eead4", dash: [] },
     { key: "blocked_queries", label: "Blocked", color: "#fb7185", dash: [7, 5] },
@@ -15,6 +19,39 @@
 
   const chartStates = new WeakMap();
   const hoverBound = new WeakSet();
+
+  /* Theme colors read from CSS custom properties so charts follow light/dark.
+     Falls back to the dark palette when there is no DOM (e.g. under node:test). */
+  function readColors() {
+    const fallback = {
+      total: "#5eead4", blocked: "#fb7185", cache: "#fbbf24",
+      grid: "#253047", axis: "#8793a8", fg: "#e8edf6", neutral: "#93c5fd",
+      tooltipBg: "#0c1119", tooltipBorder: "#253047"
+    };
+    if (typeof document === "undefined" || typeof getComputedStyle !== "function") return fallback;
+    const style = getComputedStyle(document.documentElement);
+    const read = (name, fb) => {
+      const value = style.getPropertyValue(name).trim();
+      return value || fb;
+    };
+    return {
+      total: read("--chart-total", fallback.total),
+      blocked: read("--chart-blocked", fallback.blocked),
+      cache: read("--chart-cache", fallback.cache),
+      grid: read("--chart-grid", fallback.grid),
+      axis: read("--chart-axis", fallback.axis),
+      fg: read("--chart-fg", fallback.fg),
+      neutral: read("--chart-neutral", fallback.neutral),
+      tooltipBg: read("--chart-tooltip-bg", fallback.tooltipBg),
+      tooltipBorder: read("--chart-tooltip-border", fallback.tooltipBorder)
+    };
+  }
+
+  function seriesColor(key, colors) {
+    if (key === "total_queries") return colors.total;
+    if (key === "blocked_queries") return colors.blocked;
+    return colors.cache;
+  }
 
   function normalizeValue(value) {
     const number = Number(value);
@@ -54,9 +91,9 @@
     }));
   }
 
-  /* Upper x-axis bound for the observation curve: driven mainly by the range of observed points, rounded up to a readable tick;
-     the configured capacity is also included when it is within 10x the observed maximum, otherwise the axis is not stretched for it
-     (during rendering the configured value is annotated with text in the corner). */
+  /* Upper bound for a count axis: driven mainly by the observed sizes, rounded up
+     to a readable tick; the configured capacity is included only when it is within
+     10x the observed maximum, otherwise the axis is not stretched for it. */
   function cacheCurveAxisMax(points, maxEntries) {
     const observed = Math.max(
       1,
@@ -68,6 +105,38 @@
       : observed;
     const magnitude = Math.pow(10, Math.floor(Math.log10(target)));
     return Math.ceil(target / magnitude) * magnitude;
+  }
+
+  /* Two-bar snapshot model for the cache panel: one bar for the current entry
+     count (left count axis, scaled against the configured capacity), one for the
+     current cumulative hit rate (right 0-100% axis). Pure so it can be unit tested. */
+  function cacheBars(data) {
+    const currentEntries = normalizeValue(data && data.current_entries);
+    const maxEntries = normalizeValue(data && data.max_entries);
+    const rate = data && data.current ? Number(data.current.hit_rate) : NaN;
+    const hasRate = Number.isFinite(rate);
+    const hitRate = hasRate ? Math.min(1, Math.max(0, rate)) : 0;
+    const countAxisMax = cacheCurveAxisMax([{ size: currentEntries }], maxEntries);
+    return {
+      countAxisMax,
+      hasRate,
+      bars: [
+        {
+          key: "count",
+          label: "Entries",
+          value: currentEntries,
+          display: formatCount(currentEntries),
+          ratio: countAxisMax > 0 ? Math.min(1, currentEntries / countAxisMax) : 0
+        },
+        {
+          key: "rate",
+          label: "Hit rate",
+          value: hitRate,
+          display: hasRate ? `${(hitRate * 100).toFixed(1)}%` : "--",
+          ratio: hitRate
+        }
+      ]
+    };
   }
 
   function setupCanvas(canvas, minHeight) {
@@ -84,19 +153,35 @@
     return { context, width, height };
   }
 
-  function drawEmpty(context, width, height, message) {
-    context.fillStyle = "#8793a8";
+  function drawEmpty(context, width, height, message, color) {
+    context.fillStyle = color || "#8793a8";
     context.textAlign = "center";
-    context.textBaseline = "alphabetic";
+    context.textBaseline = "middle";
     context.fillText(message, width / 2, height / 2);
   }
 
+  /* Fills a rectangle with its two top corners rounded (bars grow up from a baseline). */
+  function fillBar(context, x, y, barWidth, barHeight, radius) {
+    if (barHeight <= 0) return;
+    const r = Math.max(0, Math.min(radius, barWidth / 2, barHeight));
+    context.beginPath();
+    context.moveTo(x, y + barHeight);
+    context.lineTo(x, y + r);
+    context.arcTo(x, y, x + r, y, r);
+    context.lineTo(x + barWidth - r, y);
+    context.arcTo(x + barWidth, y, x + barWidth, y + r, r);
+    context.lineTo(x + barWidth, y + barHeight);
+    context.closePath();
+    context.fill();
+  }
+
   function drawTrend(canvas, state, hover) {
+    const colors = readColors();
     const { context, width, height } = setupCanvas(canvas, 160);
     const buckets = state.buckets;
     if (!Array.isArray(buckets) || buckets.length === 0) {
       state.layout = null;
-      return drawEmpty(context, width, height, "No query data");
+      return drawEmpty(context, width, height, "No query data", colors.axis);
     }
 
     const maximum = Math.max(1, ...buckets.map((bucket) => normalizeValue(bucket.total_queries)));
@@ -113,26 +198,26 @@
     context.setLineDash([]);
     for (let line = 0; line <= 4; line += 1) {
       const y = inset.top + (plotHeight * line / 4);
-      context.strokeStyle = "#253047";
+      context.strokeStyle = colors.grid;
       context.beginPath();
       context.moveTo(inset.left, y);
       context.lineTo(width - inset.right, y);
       context.stroke();
-      context.fillStyle = "#8793a8";
+      context.fillStyle = colors.axis;
       context.fillText(formatCount(topTick * (4 - line) / 4), inset.left - 7, y);
     }
 
     const xAt = (index) => inset.left + (buckets.length === 1 ? plotWidth / 2 : plotWidth * index / (buckets.length - 1));
     const yAt = (value) => inset.top + plotHeight - (normalizeValue(value) / topTick * plotHeight);
     context.textBaseline = "top";
-    context.fillStyle = "#8793a8";
+    context.fillStyle = colors.axis;
     [...new Set([0, Math.floor((buckets.length - 1) / 2), buckets.length - 1])].forEach((index) => {
       context.textAlign = index === 0 ? "left" : index === buckets.length - 1 ? "right" : "center";
       context.fillText(formatBucketLabel(buckets[index].timestamp, state.granularity), xAt(index), height - 26);
     });
 
-    series.forEach(({ key, color, dash }) => {
-      context.strokeStyle = color;
+    series.forEach(({ key, dash }) => {
+      context.strokeStyle = seriesColor(key, colors);
       context.lineWidth = 2;
       context.lineJoin = "round";
       context.setLineDash(dash);
@@ -147,24 +232,24 @@
     });
     context.setLineDash([]);
 
-    if (hover != null && buckets[hover]) drawTrendHover(context, state, hover, width, xAt, yAt);
+    if (hover != null && buckets[hover]) drawTrendHover(context, state, hover, width, xAt, yAt, colors);
   }
 
-  function drawTrendHover(context, state, hover, width, xAt, yAt) {
+  function drawTrendHover(context, state, hover, width, xAt, yAt, colors) {
     const bucket = state.buckets[hover];
     const layout = state.layout;
     const x = xAt(hover);
 
     context.setLineDash([3, 4]);
-    context.strokeStyle = "#8793a8";
+    context.strokeStyle = colors.axis;
     context.lineWidth = 1;
     context.beginPath();
     context.moveTo(x, layout.top);
     context.lineTo(x, layout.top + layout.plotHeight);
     context.stroke();
     context.setLineDash([]);
-    series.forEach(({ key, color }) => {
-      context.fillStyle = color;
+    series.forEach(({ key }) => {
+      context.fillStyle = seriesColor(key, colors);
       context.beginPath();
       context.arc(x, yAt(bucket[key]), 3.2, 0, Math.PI * 2);
       context.fill();
@@ -188,19 +273,19 @@
     if (boxX < 4) boxX = 4;
     const boxY = layout.top + 4;
 
-    context.fillStyle = "rgba(8, 11, 18, .95)";
+    context.fillStyle = colors.tooltipBg;
     context.fillRect(boxX, boxY, boxWidth, boxHeight);
-    context.strokeStyle = "#253047";
+    context.strokeStyle = colors.tooltipBorder;
     context.strokeRect(boxX + 0.5, boxY + 0.5, boxWidth - 1, boxHeight - 1);
     context.textAlign = "left";
     context.textBaseline = "middle";
-    context.fillStyle = "#8793a8";
+    context.fillStyle = colors.axis;
     context.fillText(title, boxX + paddingX, boxY + paddingY + lineHeight / 2);
     rows.forEach((row, index) => {
       const lineY = boxY + paddingY + lineHeight * (index + 1) + lineHeight / 2;
-      context.fillStyle = row.color;
+      context.fillStyle = seriesColor(series[index].key, colors);
       context.fillRect(boxX + paddingX, lineY - 1.5, swatch, 3);
-      context.fillStyle = "#e8edf6";
+      context.fillStyle = colors.fg;
       context.fillText(rowTexts[index], boxX + paddingX + swatch + 6, lineY);
     });
   }
@@ -238,101 +323,72 @@
     bindHover(canvas);
   }
 
-  /* Hit rate vs. cache size curve: each point is one observation (cache entry count at that time, cumulative hit rate),
-     connected into a line in ascending order of capacity; a dashed vertical line marks the configured capacity, and a hollow circle marks the most recent observation. */
-  function renderCacheCurve(canvas, data) {
+  /* Cache panel: two narrow bars with independent axes — current entry count on
+     the left count axis, current cumulative hit rate on the right 0-100% axis. */
+  function renderCacheBars(canvas, data) {
+    const colors = readColors();
     const { context, width, height } = setupCanvas(canvas, 160);
-    const points = Array.isArray(data && data.points) ? data.points : [];
-    if (points.length === 0) return drawEmpty(context, width, height, "Collecting observations...");
+    const model = cacheBars(data || {});
+    if (model.bars[0].value === 0 && !model.hasRate) {
+      return drawEmpty(context, width, height, "Collecting observations...", colors.axis);
+    }
 
-    const configured = normalizeValue(data.max_entries);
-    const maxSize = cacheCurveAxisMax(points, configured);
-    const inset = { top: 18, right: 12, bottom: 38, left: 46 };
+    const inset = { top: 24, right: 50, bottom: 34, left: 50 };
     const plotWidth = Math.max(1, width - inset.left - inset.right);
     const plotHeight = Math.max(1, height - inset.top - inset.bottom);
-    const xAt = (size) => inset.left + plotWidth * Math.min(1, normalizeValue(size) / maxSize);
-    const yAt = (rate) => inset.top + plotHeight - Math.min(1, Math.max(0, Number(rate) || 0)) * plotHeight;
+    const baseline = inset.top + plotHeight;
+    const axisColors = [colors.total, colors.cache];
 
+    // Horizontal gridlines with a count axis on the left and a percent axis on the right.
     context.lineWidth = 1;
-    context.textAlign = "right";
     context.textBaseline = "middle";
-    context.setLineDash([]);
     for (let line = 0; line <= 4; line += 1) {
       const y = inset.top + (plotHeight * line / 4);
-      context.strokeStyle = "#253047";
+      context.strokeStyle = colors.grid;
       context.beginPath();
       context.moveTo(inset.left, y);
       context.lineTo(width - inset.right, y);
       context.stroke();
-      context.fillStyle = "#8793a8";
-      context.fillText(`${100 - line * 25}%`, inset.left - 7, y);
-    }
-
-    context.textBaseline = "top";
-    context.fillStyle = "#8793a8";
-    [0, 0.5, 1].forEach((fraction) => {
-      context.textAlign = fraction === 0 ? "left" : fraction === 1 ? "right" : "center";
-      context.fillText(formatCount(maxSize * fraction), inset.left + plotWidth * fraction, height - 26);
-    });
-
-    if (configured >= 1 && configured <= maxSize) {
-      const configX = xAt(configured);
-      context.setLineDash([4, 4]);
-      context.strokeStyle = "#fbbf24";
-      context.beginPath();
-      context.moveTo(configX, inset.top);
-      context.lineTo(configX, inset.top + plotHeight);
-      context.stroke();
-      context.setLineDash([]);
-      context.fillStyle = "#fbbf24";
-      context.textBaseline = "alphabetic";
-      context.textAlign = configX > width - 70 ? "right" : "left";
-      context.fillText(`Configured ${formatCount(configured)}`, configX + (configX > width - 70 ? -5 : 5), inset.top + 10);
-    } else if (configured >= 1) {
-      // Configured capacity far exceeds the observed range: don't stretch the axis for it, just annotate in the top-right corner
-      context.fillStyle = "#fbbf24";
-      context.textBaseline = "alphabetic";
+      context.fillStyle = axisColors[0];
       context.textAlign = "right";
-      context.fillText(`Configured ${formatCount(configured)} →`, width - inset.right, inset.top + 10);
+      context.fillText(formatCount(model.countAxisMax * (4 - line) / 4), inset.left - 8, y);
+      context.fillStyle = axisColors[1];
+      context.textAlign = "left";
+      context.fillText(`${100 - line * 25}%`, width - inset.right + 8, y);
     }
 
-    context.strokeStyle = "#5eead4";
-    context.lineWidth = 2;
-    context.lineJoin = "round";
-    context.beginPath();
-    points.forEach((point, index) => {
-      const x = xAt(point.size);
-      const y = yAt(point.hit_rate);
-      if (index === 0) context.moveTo(x, y);
-      else context.lineTo(x, y);
-    });
-    context.stroke();
-    context.fillStyle = "#5eead4";
-    points.forEach((point) => {
-      context.beginPath();
-      context.arc(xAt(point.size), yAt(point.hit_rate), 2, 0, Math.PI * 2);
-      context.fill();
-    });
+    const barWidth = Math.min(48, Math.max(24, plotWidth / 4));
+    const centers = [inset.left + plotWidth * 0.28, inset.left + plotWidth * 0.72];
+    model.bars.forEach((bar, index) => {
+      const barHeight = Math.max(0, Math.min(1, bar.ratio)) * plotHeight;
+      const x = centers[index] - barWidth / 2;
+      const y = baseline - barHeight;
+      context.fillStyle = axisColors[index];
+      fillBar(context, x, y, barWidth, barHeight, 4);
 
-    const current = data.current;
-    if (current && Number.isFinite(Number(current.size))) {
-      context.beginPath();
-      context.arc(xAt(current.size), yAt(current.hit_rate), 4.5, 0, Math.PI * 2);
-      context.strokeStyle = "#e8edf6";
-      context.lineWidth = 1.5;
-      context.stroke();
-    }
+      context.fillStyle = colors.fg;
+      context.textAlign = "center";
+      context.textBaseline = "alphabetic";
+      context.fillText(bar.display, centers[index], Math.max(inset.top + 10, y - 7));
+
+      context.fillStyle = colors.axis;
+      context.textBaseline = "top";
+      context.fillText(bar.label, centers[index], baseline + 8);
+    });
   }
 
   return {
     render,
-    renderCacheCurve,
+    renderCacheBars,
     normalizeValue,
     formatCount,
     formatBucketLabel,
     hoverIndex,
     tooltipRows,
     cacheCurveAxisMax,
+    cacheBars,
+    seriesColor,
+    readColors,
     series
   };
 }));
