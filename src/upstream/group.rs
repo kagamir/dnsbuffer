@@ -64,11 +64,10 @@ impl UpstreamGroup {
             })
             .collect()
     }
-}
 
-#[async_trait]
-impl Resolver for UpstreamGroup {
-    async fn resolve(&self, query: &Message) -> Result<Message> {
+    /// Weighted-select a member, reselecting on failure, and report the name of
+    /// the member that produced the answer.
+    async fn resolve_member(&self, query: &Message) -> Result<(Message, String)> {
         if self.members.is_empty() {
             bail!("upstream group is empty");
         }
@@ -87,7 +86,7 @@ impl Resolver for UpstreamGroup {
                     tried.push(untried);
                     let m = &self.members[untried];
                     match try_member(m, query).await {
-                        Ok(resp) => return Ok(resp),
+                        Ok(resp) => return Ok((resp, m.name.clone())),
                         Err(e) => last = Some(e),
                     }
                     continue;
@@ -97,11 +96,23 @@ impl Resolver for UpstreamGroup {
             tried.push(idx);
             let m = &self.members[idx];
             match try_member(m, query).await {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => return Ok((resp, m.name.clone())),
                 Err(e) => last = Some(e),
             }
         }
         Err(last.unwrap_or_else(|| anyhow::anyhow!("upstream group exhausted")))
+    }
+}
+
+#[async_trait]
+impl Resolver for UpstreamGroup {
+    async fn resolve(&self, query: &Message) -> Result<Message> {
+        Ok(self.resolve_member(query).await?.0)
+    }
+
+    async fn resolve_attributed(&self, query: &Message) -> Result<(Message, Option<String>)> {
+        let (response, name) = self.resolve_member(query).await?;
+        Ok((response, Some(name)))
     }
 }
 
@@ -149,18 +160,24 @@ impl FallbackResolver {
 #[async_trait]
 impl Resolver for FallbackResolver {
     async fn resolve(&self, query: &Message) -> Result<Message> {
-        match tokio::time::timeout(self.primary_timeout, self.primary.resolve(query)).await {
+        Ok(self.resolve_attributed(query).await?.0)
+    }
+
+    async fn resolve_attributed(&self, query: &Message) -> Result<(Message, Option<String>)> {
+        match tokio::time::timeout(self.primary_timeout, self.primary.resolve_attributed(query))
+            .await
+        {
             Ok(Ok(resp)) => Ok(resp),
             Ok(Err(e)) => {
                 tracing::info!("primary upstreams exhausted, using fallback: {e:#}");
-                self.fallback.resolve(query).await
+                self.fallback.resolve_attributed(query).await
             }
             Err(_) => {
                 tracing::info!(
                     "primary upstreams exceeded {:?} budget, using fallback",
                     self.primary_timeout
                 );
-                self.fallback.resolve(query).await
+                self.fallback.resolve_attributed(query).await
             }
         }
     }

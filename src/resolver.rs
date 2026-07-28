@@ -6,6 +6,16 @@ use hickory_proto::op::{Message, MessageType, ResponseCode};
 #[async_trait]
 pub trait Resolver: Send + Sync {
     async fn resolve(&self, query: &Message) -> Result<Message>;
+
+    /// Resolve `query` and report which named upstream produced the answer.
+    ///
+    /// Composing resolvers (groups, fallback, hedged) override this to
+    /// propagate the responding member's name up the chain. Leaf resolvers
+    /// (plaintext/DoH/DoT) keep the default, which resolves without
+    /// attribution — the enclosing group supplies the name.
+    async fn resolve_attributed(&self, query: &Message) -> Result<(Message, Option<String>)> {
+        Ok((self.resolve(query).await?, None))
+    }
 }
 
 /// Builds a response message with the same id as the request, echoing the question section, with response code SERVFAIL.

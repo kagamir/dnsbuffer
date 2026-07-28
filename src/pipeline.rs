@@ -24,6 +24,14 @@ pub struct PipelineParts {
     pub recorder: Recorder,
 }
 
+/// How an answer was produced, recorded alongside the query for the dashboard.
+struct QueryOutcome {
+    blocked: bool,
+    cache_hit: bool,
+    /// Name of the upstream that answered, or `None` for hosts/local-block/cache-hit answers.
+    upstream: Option<String>,
+}
+
 /// Query orchestration: hosts → filter → cache (optimistic) → ECS injection → upstream chain → SERVFAIL.
 pub struct Pipeline {
     hosts: HostsMap,
@@ -63,9 +71,12 @@ impl Pipeline {
         q
     }
 
-    async fn resolve_upstream(&self, query: &Message) -> anyhow::Result<Message> {
+    async fn resolve_upstream(
+        &self,
+        query: &Message,
+    ) -> anyhow::Result<(Message, Option<String>)> {
         let q = self.prepared_query(query);
-        tokio::time::timeout(self.query_timeout, self.upstream.resolve(&q))
+        tokio::time::timeout(self.query_timeout, self.upstream.resolve_attributed(&q))
             .await
             .map_err(|_| anyhow::anyhow!("query timed out after {:?}", self.query_timeout))?
     }
@@ -80,10 +91,10 @@ impl Pipeline {
         let qname = q.name().to_string();
 
         // 1. hosts
-        let (response, blocked, cache_hit) = if let Some(resp) = self.hosts.lookup(query) {
-            (resp, false, false)
+        let (response, blocked, cache_hit, upstream) = if let Some(resp) = self.hosts.lookup(query) {
+            (resp, false, false, None)
         } else if self.filter.is_blocked(&qname) {
-            (self.filter.block_response(query), true, false)
+            (self.filter.block_response(query), true, false, None)
         } else {
             // 3. Optimistic cache
             let key = CacheKey::from_query(query);
@@ -97,31 +108,41 @@ impl Pipeline {
                 }
                 // Cached block-type responses (0.0.0.0/:: returned by a filtering upstream) also count as blocked
                 let blocked = is_blocked_response(&cached);
-                (cached, blocked, true)
+                (cached, blocked, true, None)
             } else {
                 // 4. Upstream
-                let response = match self.resolve_upstream(query).await {
-                    Ok(resp) => {
+                let (response, upstream) = match self.resolve_upstream(query).await {
+                    Ok((resp, upstream)) => {
                         if resp.metadata.response_code == ResponseCode::NoError
                             && let Some(key) = key
                         {
                             self.cache.put(key, resp.clone());
                         }
-                        resp
+                        (resp, upstream)
                     }
                     Err(e) => {
                         tracing::info!("resolve failed: {e:#}");
-                        servfail(query)
+                        (servfail(query), None)
                     }
                 };
                 let blocked = is_blocked_response(&response);
-                (response, blocked, false)
+                (response, blocked, false, upstream)
             };
             // Take an observation point after each cache-processed request completes (including any write)
             self.cache_sampler.observe();
             outcome
         };
-        self.record_query(query, &response, started, started_at_ms, blocked, cache_hit);
+        self.record_query(
+            query,
+            &response,
+            started,
+            started_at_ms,
+            QueryOutcome {
+                blocked,
+                cache_hit,
+                upstream,
+            },
+        );
         response
     }
 
@@ -131,9 +152,13 @@ impl Pipeline {
         response: &Message,
         started: Instant,
         started_at_ms: i64,
-        blocked: bool,
-        cache_hit: bool,
+        outcome: QueryOutcome,
     ) {
+        let QueryOutcome {
+            blocked,
+            cache_hit,
+            upstream,
+        } = outcome;
         let Some(q) = query.queries.first() else {
             return;
         };
@@ -157,6 +182,7 @@ impl Pipeline {
             blocked,
             cache_hit,
             response_ips: ips,
+            upstream,
         });
     }
 
@@ -434,6 +460,76 @@ mod tests {
         let mut pipeline = Pipeline::new(default_parts(upstream));
         pipeline.recorder = recorder;
         (pipeline, receiver)
+    }
+
+    /// Attributed upstream returning a cacheable (TTL>0) answer, mimicking how an
+    /// upstream group reports the responding member's name via `resolve_attributed`.
+    struct CachingAttributed(&'static str);
+    #[async_trait]
+    impl Resolver for CachingAttributed {
+        async fn resolve(&self, query: &Message) -> Result<Message> {
+            let mut resp = Message::new(
+                query.metadata.id,
+                MessageType::Response,
+                query.metadata.op_code,
+            );
+            resp.metadata.response_code = ResponseCode::NoError;
+            if let Some(q) = query.queries.first() {
+                resp.add_query(q.clone());
+                resp.add_answer(Record::from_rdata(
+                    q.name().clone(),
+                    300,
+                    RData::A(A::new(1, 2, 3, 4)),
+                ));
+            }
+            Ok(resp)
+        }
+        async fn resolve_attributed(
+            &self,
+            query: &Message,
+        ) -> Result<(Message, Option<String>)> {
+            Ok((self.resolve(query).await?, Some(self.0.to_string())))
+        }
+    }
+
+    #[tokio::test]
+    async fn records_answering_upstream_on_miss_but_not_on_cache_hit() {
+        let (pipeline, mut events) =
+            recording_parts(Arc::new(CachingAttributed("doh:cloudflare")));
+        let query = sample_query();
+        pipeline.handle(&query).await; // upstream miss → cached
+        pipeline.handle(&query).await; // cache hit
+
+        let miss = events.recv().await.unwrap();
+        assert_eq!(
+            miss.upstream.as_deref(),
+            Some("doh:cloudflare"),
+            "an upstream-served answer is attributed"
+        );
+        assert!(!miss.cache_hit);
+
+        let hit = events.recv().await.unwrap();
+        assert_eq!(
+            hit.upstream, None,
+            "a cache hit did not go to an upstream and carries no attribution"
+        );
+        assert!(hit.cache_hit);
+    }
+
+    #[tokio::test]
+    async fn hosts_answer_records_no_upstream_attribution() {
+        let (recorder, mut events) = Recorder::channel(4);
+        let mut parts = default_parts(Arc::new(CachingAttributed("doh:cloudflare")));
+        parts.hosts = crate::hosts::HostsMap::from_entries(&[crate::config::HostEntry {
+            name: "example.com".into(),
+            addrs: vec!["1.2.3.4".parse().unwrap()],
+        }]);
+        let mut pipeline = Pipeline::new(parts);
+        pipeline.recorder = recorder;
+        pipeline.handle(&sample_query()).await;
+
+        let hosts = events.recv().await.unwrap();
+        assert_eq!(hosts.upstream, None, "a hosts answer has no upstream");
     }
 
     #[tokio::test]

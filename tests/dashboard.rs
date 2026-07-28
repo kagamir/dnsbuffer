@@ -309,6 +309,11 @@ async fn runtime_serves_dns_persists_to_http_and_drains_writer_on_shutdown() {
             let queries = http_get_json(http_addr, "/api/dashboard/queries").await;
             if queries["total"] == 1 {
                 assert_eq!(queries["records"][0]["domain"], "runtime.example");
+                assert_eq!(
+                    queries["records"][0]["upstream"],
+                    format!("plain:{upstream_addr}"),
+                    "the answering upstream is attributed on the query record"
+                );
                 break;
             }
             assert!(
@@ -487,6 +492,7 @@ fn event(domain: &str, ips: &[&str]) -> QueryEvent {
         blocked: false,
         cache_hit: true,
         response_ips: ips.iter().map(|ip| (*ip).into()).collect(),
+        upstream: None,
     }
 }
 

@@ -362,6 +362,7 @@ struct QueryRecordDto {
     blocked: bool,
     cache_hit: bool,
     response_ips: Vec<String>,
+    upstream: Option<String>,
 }
 
 impl TryFrom<QueryRecord> for QueryRecordDto {
@@ -378,6 +379,7 @@ impl TryFrom<QueryRecord> for QueryRecordDto {
             blocked: value.blocked,
             cache_hit: value.cache_hit,
             response_ips: value.response_ips,
+            upstream: value.upstream,
         })
     }
 }

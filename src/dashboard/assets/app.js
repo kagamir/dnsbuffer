@@ -248,15 +248,17 @@
     function addBadge(target, text, kind) { target.append(element("span", text, `badge ${kind}`)); }
     function renderQueries(data) {
       const body = document.querySelector("#query-body"); const records = Array.isArray(data.records) ? data.records : [];
-      if (!records.length) replaceChildren(body, [emptyRow(5, state.search ? "No matching query records" : "No query records")]);
+      if (!records.length) replaceChildren(body, [emptyRow(6, state.search ? "No matching query records" : "No query records")]);
       else replaceChildren(body, records.map((record) => {
         const row = element("tr"); const date = new Date(record.timestamp); const domain = element("td");
         domain.append(element("strong", record.domain), element("span", record.query_type, "muted block"));
         const ips = element("td"); const responseIps = Array.isArray(record.response_ips) ? record.response_ips : [];
         if (!responseIps.length) ips.append(element("span", "--", "muted")); else responseIps.forEach((ip) => ips.append(element("code", ip)));
+        const upstream = element("td");
+        if (record.upstream) upstream.append(element("code", record.upstream)); else upstream.append(element("span", "--", "muted"));
         const result = element("td", undefined, "result-cell"); addBadge(result, record.response_code || "UNKNOWN", "badge-neutral");
         if (record.blocked) addBadge(result, "Blocked", "badge-blocked"); if (record.cache_hit) addBadge(result, "Cache", "badge-cache");
-        row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, element("td", `${record.duration_ms} ms`), result); return row;
+        row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, upstream, element("td", `${record.duration_ms} ms`), result); return row;
       }));
       document.querySelector("#page-status").textContent = `Page ${state.page} of ${state.totalPages}`;
       document.querySelector("#record-count").textContent = `${window.DnsTrendChart.formatCount(data.total)} records`;

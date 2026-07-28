@@ -10,7 +10,7 @@ use rusqlite::{Connection, params, params_from_iter};
 
 use super::{QueryEvent, Recorder};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 const MAX_TREND_BUCKETS: u64 = 10_000;
@@ -278,6 +278,8 @@ pub struct QueryRecord {
     pub blocked: bool,
     pub cache_hit: bool,
     pub response_ips: Vec<String>,
+    /// Name of the upstream that answered, or `None` for hosts/local-block/cache-hit rows.
+    pub upstream: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -331,7 +333,8 @@ impl Store {
                    response_code TEXT NOT NULL,
                    duration_ms INTEGER NOT NULL CHECK(duration_ms >= 0),
                    blocked INTEGER NOT NULL CHECK(blocked IN (0,1)),
-                   cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0,1))
+                   cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0,1)),
+                   upstream TEXT
                  );
                  CREATE INDEX query_logs_time_idx ON query_logs(timestamp_ms DESC, id DESC);
                  CREATE INDEX query_logs_domain_idx ON query_logs(domain);
@@ -353,11 +356,13 @@ impl Store {
                    blocked_queries INTEGER NOT NULL,
                    cache_hits INTEGER NOT NULL
                  );
-                 PRAGMA user_version = 1;",
+                 PRAGMA user_version = 2;",
             )?;
             transaction.commit()?;
+        } else if version < SCHEMA_VERSION {
+            migrate_to_current(&mut conn)?;
         }
-        validate_schema_v1(&mut conn)?;
+        validate_schema(&mut conn)?;
         Ok(store)
     }
 
@@ -374,8 +379,8 @@ impl Store {
         for event in events {
             transaction.execute(
                 "INSERT INTO query_logs (
-                   timestamp_ms, domain, query_type, response_code, duration_ms, blocked, cache_hit
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                   timestamp_ms, domain, query_type, response_code, duration_ms, blocked, cache_hit, upstream
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     event.timestamp_ms,
                     event.domain,
@@ -384,6 +389,7 @@ impl Store {
                     event.duration_ms,
                     event.blocked,
                     event.cache_hit,
+                    event.upstream,
                 ],
             )?;
             let query_id = transaction.last_insert_rowid();
@@ -623,7 +629,7 @@ impl Store {
         };
         let list_sql = format!(
             "SELECT id, timestamp_ms, domain, query_type, response_code,
-                    duration_ms, blocked, cache_hit
+                    duration_ms, blocked, cache_hit, upstream
              FROM query_logs {filter}
              ORDER BY timestamp_ms DESC, id DESC LIMIT ? OFFSET ?"
         );
@@ -732,7 +738,34 @@ impl Store {
     }
 }
 
-fn validate_schema_v1(conn: &mut Connection) -> Result<()> {
+/// Bring an older on-disk schema up to the current version. Currently this only
+/// covers v1 → v2, which adds the nullable `upstream` column recording which
+/// upstream answered each query. When the `query_logs` table is missing the
+/// column addition is skipped and left for `validate_schema` to report.
+fn migrate_to_current(conn: &mut Connection) -> Result<()> {
+    let transaction = conn.transaction()?;
+    let has_query_logs: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'query_logs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_query_logs {
+        let has_upstream = transaction
+            .prepare("PRAGMA table_info(query_logs)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .iter()
+            .any(|name| name == "upstream");
+        if !has_upstream {
+            transaction.execute("ALTER TABLE query_logs ADD COLUMN upstream TEXT", [])?;
+        }
+    }
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn validate_schema(conn: &mut Connection) -> Result<()> {
     type RequiredColumn = (&'static str, &'static str, bool, i32);
     type RequiredTable = (&'static str, &'static [RequiredColumn]);
     let required_columns: [RequiredTable; 4] = [
@@ -747,6 +780,7 @@ fn validate_schema_v1(conn: &mut Connection) -> Result<()> {
                 ("duration_ms", "INTEGER", true, 0),
                 ("blocked", "INTEGER", true, 0),
                 ("cache_hit", "INTEGER", true, 0),
+                ("upstream", "TEXT", false, 0),
             ],
         ),
         (
@@ -962,6 +996,7 @@ fn query_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueryRecord> {
         duration_ms: row.get(5)?,
         blocked: row.get(6)?,
         cache_hit: row.get(7)?,
+        upstream: row.get(8)?,
         response_ips: Vec::new(),
     })
 }
@@ -1023,6 +1058,7 @@ mod tests {
             blocked: false,
             cache_hit: false,
             response_ips: ips.iter().map(|ip| (*ip).into()).collect(),
+            upstream: None,
         }
     }
 
@@ -1038,6 +1074,7 @@ mod tests {
             blocked: false,
             cache_hit: true,
             response_ips: vec!["1.1.1.1".into(), "1.1.1.1".into(), "2606:4700::1111".into()],
+            upstream: Some("doh:cloudflare".into()),
         };
         store.insert_events(&[event]).unwrap();
         let conn = store.connect().unwrap();
@@ -1048,6 +1085,10 @@ mod tests {
             1
         );
         assert_eq!(scalar(&conn, "SELECT cache_hits FROM query_daily_stats"), 1);
+        let upstream: String = conn
+            .query_row("SELECT upstream FROM query_logs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(upstream, "doh:cloudflare");
     }
 
     #[test]
@@ -1080,6 +1121,7 @@ mod tests {
             blocked: false,
             cache_hit: false,
             response_ips: Vec::new(),
+            upstream: None,
         };
 
         assert!(store.insert_events(&[event]).is_err());
@@ -1097,6 +1139,7 @@ mod tests {
             blocked: true,
             cache_hit: false,
             response_ips: Vec::new(),
+            upstream: None,
         };
         let second = QueryEvent {
             timestamp_ms: first.timestamp_ms + 1_000,
@@ -1107,6 +1150,7 @@ mod tests {
             blocked: false,
             cache_hit: true,
             response_ips: Vec::new(),
+            upstream: None,
         };
         store.insert_events(&[first]).unwrap();
         drop(store);
@@ -1124,6 +1168,44 @@ mod tests {
             1
         );
         assert_eq!(scalar(&conn, "SELECT cache_hits FROM query_daily_stats"), 1);
+    }
+
+    #[test]
+    fn migrates_v1_database_by_adding_nullable_upstream_column() {
+        let mut schema = query_logs_table("PRIMARY KEY");
+        schema.push_str(remaining_schema_tables());
+        let guard = create_custom_v1("migrate-upstream", &schema);
+        // Seed a legacy row using the v1 column set (before the upstream column exists).
+        Connection::open(guard.path())
+            .unwrap()
+            .execute(
+                "INSERT INTO query_logs
+                   (timestamp_ms, domain, query_type, response_code, duration_ms, blocked, cache_hit)
+                 VALUES (1753488000000, 'legacy.example', 'A', 'NOERROR', 5, 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        // Opening migrates v1 → v2 (adding the upstream column) and validates cleanly.
+        let store = Store::open(guard.path()).unwrap();
+        let page = store.queries(1, 10, None).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.records[0].domain, "legacy.example");
+        assert_eq!(page.records[0].upstream, None);
+
+        // New writes populate the freshly added column and read back.
+        let mut fresh = event(1_753_488_000_001, "fresh.example", &[]);
+        fresh.upstream = Some("plain:1.1.1.1:53".into());
+        store.insert_events(&[fresh]).unwrap();
+        let page = store.queries(1, 10, Some("fresh")).unwrap();
+        assert_eq!(page.records[0].upstream.as_deref(), Some("plain:1.1.1.1:53"));
+
+        let version: i64 = store
+            .connect()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, super::SCHEMA_VERSION);
     }
 
     #[test]

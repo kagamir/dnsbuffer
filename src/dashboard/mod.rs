@@ -195,6 +195,9 @@ pub struct QueryEvent {
     pub blocked: bool,
     pub cache_hit: bool,
     pub response_ips: Vec<String>,
+    /// Name of the upstream that produced the answer, or `None` when the answer
+    /// did not come from an upstream (hosts entry, local block, or cache hit).
+    pub upstream: Option<String>,
 }
 
 #[derive(Clone)]

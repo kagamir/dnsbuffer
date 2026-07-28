@@ -26,14 +26,18 @@ impl HedgedResolver {
         }
     }
 
-    fn spawn_attempt(&self, attempts: &mut tokio::task::JoinSet<Result<Message>>, query: &Message) {
+    fn spawn_attempt(
+        &self,
+        attempts: &mut tokio::task::JoinSet<Result<(Message, Option<String>)>>,
+        query: &Message,
+    ) {
         let inner = self.inner.clone();
         let query = query.clone();
-        attempts.spawn(async move { inner.resolve(&query).await });
+        attempts.spawn(async move { inner.resolve_attributed(&query).await });
     }
 }
 
-async fn stop_attempts(attempts: &mut tokio::task::JoinSet<Result<Message>>) {
+async fn stop_attempts(attempts: &mut tokio::task::JoinSet<Result<(Message, Option<String>)>>) {
     attempts.abort_all();
     while attempts.join_next().await.is_some() {}
 }
@@ -41,6 +45,10 @@ async fn stop_attempts(attempts: &mut tokio::task::JoinSet<Result<Message>>) {
 #[async_trait]
 impl Resolver for HedgedResolver {
     async fn resolve(&self, query: &Message) -> Result<Message> {
+        Ok(self.resolve_attributed(query).await?.0)
+    }
+
+    async fn resolve_attributed(&self, query: &Message) -> Result<(Message, Option<String>)> {
         let mut attempts = tokio::task::JoinSet::new();
         let deadline = Instant::now() + self.max_wait;
         let mut next_hedge = Instant::now() + self.interval;
