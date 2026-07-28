@@ -2,15 +2,29 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hickory_proto::op::Message;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::Instant;
 
-use crate::resolver::Resolver;
+use crate::resolver::{QUERY_SUCCEEDED, Resolver};
 
-/// Hedged fast retry: if an attempt does not return within `interval`, a new attempt is launched in parallel
-/// (each attempt re-runs the inner weighted selection, very likely picking a different member); whichever succeeds first wins.
-/// If all in-flight attempts fail, it errors immediately (a failure is not slowness, so hand it to the upper-level fallback);
-/// if there is still no result after the max_wait budget, it gives up. Any remaining in-flight attempts are cancelled when resolution ends.
+/// Hard cap on parallel hedged attempts, so a black-hole upstream group does not
+/// accumulate an unbounded pile of in-flight sockets within one budget window.
+const MAX_IN_FLIGHT: usize = 8;
+/// Throttle floor for relaunching after an active error: a fast-failing upstream
+/// (e.g. instant RST) is retried at most every RETRY_FLOOR instead of busy-looping.
+const RETRY_FLOOR: Duration = Duration::from_millis(50);
+
+/// Budget-scoped retry engine: keeps trying the inner resolver until one attempt
+/// succeeds or the `max_wait` budget expires — the only two possible outcomes.
+///
+/// An active error (transport failure) is not a final verdict: the failed attempt
+/// is relaunched (throttled by [`RETRY_FLOOR`]) for as long as budget remains.
+/// With `interval > 0`, slowness also triggers hedging: a parallel attempt is
+/// launched every `interval` (each re-runs the inner weighted selection, very
+/// likely picking a different member) and whichever succeeds first wins; with
+/// `interval == 0`, retries stay serial (one attempt in flight at a time).
+/// Any remaining in-flight attempts are cancelled when resolution ends.
 pub struct HedgedResolver {
     inner: Arc<dyn Resolver>,
     interval: Duration,
@@ -30,10 +44,15 @@ impl HedgedResolver {
         &self,
         attempts: &mut tokio::task::JoinSet<Result<(Message, Option<String>)>>,
         query: &Message,
+        succeeded: &Arc<AtomicBool>,
     ) {
         let inner = self.inner.clone();
         let query = query.clone();
-        attempts.spawn(async move { inner.resolve_attributed(&query).await });
+        // Scope the success flag around the attempt so per-member accounting can
+        // distinguish "cancelled because a sibling won" from a budget timeout.
+        attempts.spawn(QUERY_SUCCEEDED.scope(succeeded.clone(), async move {
+            inner.resolve_attributed(&query).await
+        }));
     }
 }
 
@@ -50,15 +69,25 @@ impl Resolver for HedgedResolver {
 
     async fn resolve_attributed(&self, query: &Message) -> Result<(Message, Option<String>)> {
         let mut attempts = tokio::task::JoinSet::new();
+        let succeeded = Arc::new(AtomicBool::new(false));
+        let max_in_flight = if self.interval.is_zero() {
+            1
+        } else {
+            MAX_IN_FLIGHT
+        };
         let deadline = Instant::now() + self.max_wait;
         let mut next_hedge = Instant::now() + self.interval;
+        let mut last_spawn = Instant::now();
+        // Only polled while nothing is in flight (all attempts errored out).
+        let mut retry_at = last_spawn;
         let mut in_flight = 1usize;
-        self.spawn_attempt(&mut attempts, query);
+        let mut last_error: Option<anyhow::Error> = None;
+        self.spawn_attempt(&mut attempts, query, &succeeded);
 
         loop {
             tokio::select! {
                 biased;
-                joined = attempts.join_next() => {
+                joined = attempts.join_next(), if in_flight > 0 => {
                     in_flight -= 1;
                     let result = match joined.expect("an attempt is in flight") {
                         Ok(result) => result,
@@ -66,32 +95,48 @@ impl Resolver for HedgedResolver {
                     };
                     match result {
                         Ok(response) => {
+                            succeeded.store(true, Ordering::SeqCst);
                             stop_attempts(&mut attempts).await;
                             return Ok(response);
                         }
-                        Err(error) if in_flight == 0 => {
-                            stop_attempts(&mut attempts).await;
-                            return Err(error);
-                        }
                         Err(error) => {
-                            tracing::debug!("hedged attempt failed, others in flight: {error:#}");
+                            // An active error is not a final verdict: keep retrying
+                            // for as long as budget remains.
+                            tracing::debug!("upstream attempt failed, retrying within budget: {error:#}");
+                            last_error = Some(error);
+                            if in_flight == 0 {
+                                retry_at = Instant::now().max(last_spawn + RETRY_FLOOR);
+                            }
                         }
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    let error = anyhow::anyhow!(
-                        "no upstream reply within {:?} ({} hedged attempts in flight)",
-                        self.max_wait,
-                        in_flight
-                    );
+                    let error = match last_error {
+                        Some(e) => e.context(format!(
+                            "no upstream success within {:?} budget",
+                            self.max_wait
+                        )),
+                        None => anyhow::anyhow!(
+                            "no upstream reply within {:?} budget ({in_flight} attempts in flight)",
+                            self.max_wait
+                        ),
+                    };
                     stop_attempts(&mut attempts).await;
                     return Err(error);
                 }
-                _ = tokio::time::sleep_until(next_hedge) => {
+                _ = tokio::time::sleep_until(next_hedge), if !self.interval.is_zero() => {
                     next_hedge += self.interval;
+                    if in_flight < max_in_flight {
+                        in_flight += 1;
+                        last_spawn = Instant::now();
+                        tracing::debug!("hedging: launching parallel attempt #{in_flight}");
+                        self.spawn_attempt(&mut attempts, query, &succeeded);
+                    }
+                }
+                _ = tokio::time::sleep_until(retry_at), if in_flight == 0 => {
                     in_flight += 1;
-                    tracing::debug!("hedging: launching parallel attempt #{in_flight}");
-                    self.spawn_attempt(&mut attempts, query);
+                    last_spawn = Instant::now();
+                    self.spawn_attempt(&mut attempts, query, &succeeded);
                 }
             }
         }
@@ -201,10 +246,11 @@ mod tests {
         }
     }
 
-    struct InstantErr;
+    struct InstantErr(AtomicUsize);
     #[async_trait]
     impl Resolver for InstantErr {
         async fn resolve(&self, _q: &Message) -> Result<Message> {
+            self.0.fetch_add(1, Ordering::SeqCst);
             Err(anyhow!("dead"))
         }
     }
@@ -258,17 +304,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn total_failure_bubbles_up_without_waiting_for_ticks() {
+    async fn active_errors_retry_until_budget_expires() {
+        let inner = Arc::new(InstantErr(AtomicUsize::new(0)));
         let hedged = HedgedResolver::new(
-            Arc::new(InstantErr),
-            Duration::from_millis(500),
-            Duration::from_secs(5),
+            inner.clone(),
+            Duration::ZERO, // serial mode: retries alone must fill the budget
+            Duration::from_millis(300),
         );
         let start = std::time::Instant::now();
         assert!(hedged.resolve(&sample_query()).await.is_err());
+        let elapsed = start.elapsed();
         assert!(
-            start.elapsed() < Duration::from_millis(400),
-            "failure (not slowness) must return immediately so fallback can take over"
+            elapsed >= Duration::from_millis(300),
+            "an active error is retried, not surrendered: only the budget ends the query, took {elapsed:?}"
+        );
+        let calls = inner.0.load(Ordering::SeqCst);
+        assert!(calls >= 2, "failed attempts must be relaunched, got {calls}");
+        assert!(
+            calls <= 10,
+            "retries are throttled by the floor, got {calls}"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_then_recovery_within_budget_succeeds() {
+        /// Fails the first two calls with an active error, then answers.
+        struct FlakyThenOk(AtomicUsize);
+        #[async_trait]
+        impl Resolver for FlakyThenOk {
+            async fn resolve(&self, query: &Message) -> Result<Message> {
+                if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
+                    return Err(anyhow!("transient RST"));
+                }
+                Ok(ok_resp(query))
+            }
+        }
+
+        let inner = Arc::new(FlakyThenOk(AtomicUsize::new(0)));
+        let hedged = HedgedResolver::new(
+            inner.clone(),
+            Duration::ZERO,
+            Duration::from_secs(5),
+        );
+        let resp = hedged
+            .resolve(&sample_query())
+            .await
+            .expect("retry within budget recovers");
+        assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(inner.0.load(Ordering::SeqCst), 3, "two errors, then success");
+    }
+
+    #[tokio::test]
+    async fn serial_mode_keeps_a_single_attempt_in_flight() {
+        let resolver = Arc::new(ControlledResolver {
+            calls: AtomicUsize::new(0),
+            active: Arc::new(AtomicUsize::new(0)),
+            dropped: Arc::new(Notify::new()),
+            first_succeeds: false,
+        });
+        let hedged = HedgedResolver::new(
+            resolver.clone(),
+            Duration::ZERO,
+            Duration::from_millis(150),
+        );
+        assert!(hedged.resolve(&sample_query()).await.is_err());
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            1,
+            "interval 0 must not launch parallel hedges against a hanging attempt"
         );
     }
 

@@ -46,14 +46,17 @@ pub struct ServerConfig {
     /// Total per-query timeout (milliseconds), wrapping the entire "upstream + fallback" chain as the final safety net.
     #[serde(default = "default_query_timeout_ms")]
     pub query_timeout_ms: u64,
-    /// Primary upstream stage budget (milliseconds): on failure or exceeding this deadline, switch to the fallback.
+    /// Per-stage upstream budget (milliseconds): active errors are retried within this
+    /// budget; only when it expires with no success does the query move on to the fallback.
     #[serde(default = "default_upstream_timeout_ms")]
     pub upstream_timeout_ms: u64,
     /// Address-family preference when dialing the upstream: true prefers IPv6; default false (IPv4 first).
     #[serde(default)]
     pub prefer_ipv6: bool,
-    /// Hedged retry interval (milliseconds): if the primary upstream attempt does not return within this
-    /// duration, start a new attempt in parallel without cancelling the in-flight one; whichever returns first wins, until upstream_timeout_ms is exhausted. 0 disables it.
+    /// Hedged retry interval (milliseconds): if an upstream attempt does not return within this
+    /// duration, start a new attempt in parallel without cancelling the in-flight one; whichever
+    /// returns first wins, until upstream_timeout_ms is exhausted. 0 disables parallel hedging;
+    /// attempts that fail with an active error are still retried serially within the budget.
     #[serde(default = "default_hedged_retry_ms")]
     pub hedged_retry_ms: u64,
 }

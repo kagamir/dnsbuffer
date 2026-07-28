@@ -106,11 +106,21 @@ impl UpstreamStats {
         self.record_history(now_ms, Some(latency_ms));
     }
 
-    pub fn record_failure(&mut self) {
-        self.record_failure_at(unix_millis());
+    /// Active transport error (RST, connect failure, per-attempt timeout): lowers
+    /// this member's selection weight via the sliding window, but stays out of the
+    /// dashboard history — an active error is retried within the budget, so it is
+    /// not a final failure of the query.
+    pub fn record_soft_fail(&mut self) {
+        self.push(Sample::Failure);
     }
 
-    pub fn record_failure_at(&mut self, now_ms: i64) {
+    /// Budget exhausted with this member still unanswered: the only failure kind
+    /// counted in the dashboard failure rate. Also lowers the selection weight.
+    pub fn record_timeout(&mut self) {
+        self.record_timeout_at(unix_millis());
+    }
+
+    pub fn record_timeout_at(&mut self, now_ms: i64) {
         self.push(Sample::Failure);
         self.record_history(now_ms, None);
     }
@@ -209,7 +219,7 @@ mod tests {
     #[test]
     fn snapshot_distinguishes_no_success_from_cold_start_value() {
         let mut stats = UpstreamStats::new(4);
-        stats.record_failure();
+        stats.record_timeout();
         let snap = stats.snapshot();
         assert_eq!(snap.samples, 1);
         assert_eq!(snap.successes, 0);
@@ -224,6 +234,20 @@ mod tests {
     }
 
     #[test]
+    fn soft_fail_lowers_weight_but_stays_out_of_dashboard_history() {
+        let mut s = UpstreamStats::new(4);
+        s.record_soft_fail();
+        assert_eq!(s.failure_rate(), 1.0, "selection weight sees the soft fail");
+        let snap = s.snapshot();
+        assert_eq!(snap.samples, 0, "dashboard history ignores soft fails");
+        assert_eq!(snap.failure_rate, 0.0);
+        s.record_timeout();
+        let snap = s.snapshot();
+        assert_eq!(snap.samples, 1, "timeouts are the only dashboard failures");
+        assert_eq!(snap.failure_rate, 1.0);
+    }
+
+    #[test]
     fn failures_lower_weight() {
         let mut good = UpstreamStats::new(8);
         let mut bad = UpstreamStats::new(8);
@@ -232,7 +256,7 @@ mod tests {
             bad.record_success(Duration::from_millis(50));
         }
         for _ in 0..4 {
-            bad.record_failure();
+            bad.record_soft_fail();
         }
         assert!(bad.failure_rate() > 0.4);
         assert!(good.weight(5.0) > bad.weight(5.0));
@@ -253,7 +277,7 @@ mod tests {
     fn window_evicts_oldest() {
         let mut s = UpstreamStats::new(4);
         for _ in 0..4 {
-            s.record_failure();
+            s.record_soft_fail();
         }
         assert_eq!(s.failure_rate(), 1.0);
         for _ in 0..4 {
@@ -278,7 +302,7 @@ mod tests {
         const DAY_MS: i64 = 86_400_000;
         let mut s = UpstreamStats::with_retention(4, 7);
         let now = 100 * DAY_MS;
-        s.record_failure_at(now - 8 * DAY_MS);
+        s.record_timeout_at(now - 8 * DAY_MS);
         s.record_success_at(Duration::from_millis(30), now - DAY_MS);
         s.record_success_at(Duration::from_millis(10), now);
 
@@ -298,7 +322,7 @@ mod tests {
     fn zero_retention_keeps_full_history() {
         const DAY_MS: i64 = 86_400_000;
         let mut s = UpstreamStats::with_retention(2, 0);
-        s.record_failure_at(0);
+        s.record_timeout_at(0);
         s.record_success_at(Duration::from_millis(10), 400 * DAY_MS);
         let snap = s.snapshot_at(400 * DAY_MS);
         assert_eq!(snap.samples, 2);
@@ -310,7 +334,7 @@ mod tests {
     fn negative_k_treated_as_zero() {
         let mut s = UpstreamStats::new(4);
         for _ in 0..4 {
-            s.record_failure();
+            s.record_soft_fail();
         }
         let w = s.weight(-2.0);
         assert!(

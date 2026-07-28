@@ -54,38 +54,40 @@ pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<Built
     let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
     let ecs = crate::ecs::subnet_from_config(&config.ecs);
     let mut metrics = UpstreamMetricsBuilder::default();
-    let mut primary = build_group(
-        &config.upstream,
-        config,
-        &bootstrap,
-        &mut metrics,
-        "primary",
-    )
-    .await?;
-    // Hedged retry: if the primary upstream does not return within hedged_retry_ms, send a parallel retry; 0 disables it
-    if config.server.hedged_retry_ms > 0 {
-        primary = Arc::new(crate::upstream::hedged::HedgedResolver::new(
-            primary,
+    // Budget-scoped retry engine around each group: active errors are retried within
+    // upstream_timeout_ms, so a group only fails once its budget expires with no success.
+    // hedged_retry_ms > 0 additionally hedges slowness with parallel attempts.
+    let engine = |group: Arc<dyn Resolver>| -> Arc<dyn Resolver> {
+        Arc::new(crate::upstream::hedged::HedgedResolver::new(
+            group,
             std::time::Duration::from_millis(config.server.hedged_retry_ms),
             std::time::Duration::from_millis(config.server.upstream_timeout_ms),
-        ));
-    }
-    let resolver: Arc<dyn Resolver> = if config.fallback.is_empty() {
-        primary
-    } else {
-        let fb = build_group(
-            &config.fallback,
+        ))
+    };
+    let primary = engine(
+        build_group(
+            &config.upstream,
             config,
             &bootstrap,
             &mut metrics,
-            "fallback",
+            "primary",
         )
-        .await?;
-        Arc::new(FallbackResolver::new(
-            primary,
-            fb,
-            std::time::Duration::from_millis(config.server.upstream_timeout_ms),
-        ))
+        .await?,
+    );
+    let resolver: Arc<dyn Resolver> = if config.fallback.is_empty() {
+        primary
+    } else {
+        let fb = engine(
+            build_group(
+                &config.fallback,
+                config,
+                &bootstrap,
+                &mut metrics,
+                "fallback",
+            )
+            .await?,
+        );
+        Arc::new(FallbackResolver::new(primary, fb))
     };
     let metrics = metrics.build();
 

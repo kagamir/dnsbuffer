@@ -2,6 +2,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 
+tokio::task_local! {
+    /// Set by the retry engine (`HedgedResolver`) around every attempt it spawns.
+    /// Flips to true the moment any attempt of the same query succeeds, so that
+    /// per-member accounting can tell a "hedge loser cancelled because a sibling
+    /// already won" (not a failure) apart from a "budget exhausted" cancellation
+    /// (the only failure kind surfaced on the dashboard).
+    pub(crate) static QUERY_SUCCEEDED: std::sync::Arc<std::sync::atomic::AtomicBool>;
+}
+
 /// A unified abstraction implemented by all upstream resolvers (plaintext/DoH/DoT).
 #[async_trait]
 pub trait Resolver: Send + Sync {

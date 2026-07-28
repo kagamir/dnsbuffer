@@ -1,11 +1,12 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use hickory_proto::op::Message;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::dashboard::upstreams::UpstreamMetricsBuilder;
-use crate::resolver::Resolver;
+use crate::resolver::{QUERY_SUCCEEDED, Resolver};
 use crate::stats::UpstreamStats;
 use crate::upstream::selector::pick_weighted;
 
@@ -116,18 +117,74 @@ impl Resolver for UpstreamGroup {
     }
 }
 
+/// Records a timeout against the member if the in-flight attempt is dropped
+/// before it resolves. When the retry engine's budget expires it cancels the
+/// still-pending attempts: the future is dropped mid-await and neither arm in
+/// [`try_member`] runs — without this guard a black-hole upstream would keep
+/// looking perfectly healthy. A cancellation because a hedged sibling already
+/// won (detected via [`QUERY_SUCCEEDED`]) is not a failure and records nothing.
+/// Disarmed once the attempt resolves so the normal Ok/Err paths own accounting.
+struct AttemptGuard<'a> {
+    stats: &'a Mutex<UpstreamStats>,
+    /// Captured at creation while the engine's task-local scope is active;
+    /// `None` when the member is resolved outside the retry engine.
+    succeeded: Option<Arc<AtomicBool>>,
+    armed: bool,
+}
+
+impl<'a> AttemptGuard<'a> {
+    fn new(stats: &'a Mutex<UpstreamStats>) -> Self {
+        let succeeded = QUERY_SUCCEEDED.try_with(|flag| flag.clone()).ok();
+        Self {
+            stats,
+            succeeded,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AttemptGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Cancelled mid-flight. A hedged sibling delivering the answer means the
+        // query succeeded — this member was merely slower, not failing.
+        if self
+            .succeeded
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return;
+        }
+        if let Ok(mut s) = self.stats.lock() {
+            s.record_timeout();
+        }
+    }
+}
+
 async fn try_member(m: &Member, query: &Message) -> Result<Message> {
     let start = Instant::now();
+    let mut guard = AttemptGuard::new(&m.stats);
     match m.resolver.resolve(query).await {
         Ok(resp) => {
+            guard.disarm();
             if let Ok(mut s) = m.stats.lock() {
                 s.record_success(start.elapsed());
             }
             Ok(resp)
         }
         Err(e) => {
+            guard.disarm();
+            // An active transport error is soft: it lowers the member's selection
+            // weight but is not the query's final verdict — the retry engine keeps
+            // retrying within the budget, so it stays out of the dashboard failures.
             if let Ok(mut s) = m.stats.lock() {
-                s.record_failure();
+                s.record_soft_fail();
             }
             tracing::info!("upstream {} failed: {e:#}", m.name);
             Err(e)
@@ -135,25 +192,20 @@ async fn try_member(m: &Member, query: &Message) -> Result<Message> {
     }
 }
 
-/// Switches to the fallback group when the primary upstream group fails entirely.
+/// Switches to the fallback chain when the primary chain gives up.
+///
+/// The primary side is wrapped in the budget-scoped retry engine
+/// (`HedgedResolver`), which retries active errors internally and only returns
+/// `Err` once its time budget is exhausted — so "primary budget exhausted" is
+/// the single condition that triggers the fallback here.
 pub struct FallbackResolver {
     primary: Arc<dyn Resolver>,
     fallback: Arc<dyn Resolver>,
-    /// Primary-upstream phase budget: switch to fallback on failure or timeout.
-    primary_timeout: std::time::Duration,
 }
 
 impl FallbackResolver {
-    pub fn new(
-        primary: Arc<dyn Resolver>,
-        fallback: Arc<dyn Resolver>,
-        primary_timeout: std::time::Duration,
-    ) -> Self {
-        Self {
-            primary,
-            fallback,
-            primary_timeout,
-        }
+    pub fn new(primary: Arc<dyn Resolver>, fallback: Arc<dyn Resolver>) -> Self {
+        Self { primary, fallback }
     }
 }
 
@@ -164,19 +216,10 @@ impl Resolver for FallbackResolver {
     }
 
     async fn resolve_attributed(&self, query: &Message) -> Result<(Message, Option<String>)> {
-        match tokio::time::timeout(self.primary_timeout, self.primary.resolve_attributed(query))
-            .await
-        {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e)) => {
-                tracing::info!("primary upstreams exhausted, using fallback: {e:#}");
-                self.fallback.resolve_attributed(query).await
-            }
-            Err(_) => {
-                tracing::info!(
-                    "primary upstreams exceeded {:?} budget, using fallback",
-                    self.primary_timeout
-                );
+        match self.primary.resolve_attributed(query).await {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                tracing::info!("primary budget exhausted, using fallback: {e:#}");
                 self.fallback.resolve_attributed(query).await
             }
         }
@@ -213,6 +256,14 @@ mod tests {
         async fn resolve(&self, _q: &Message) -> Result<Message> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(anyhow!("dead upstream"))
+        }
+    }
+
+    struct BlackHole;
+    #[async_trait]
+    impl Resolver for BlackHole {
+        async fn resolve(&self, _q: &Message) -> Result<Message> {
+            std::future::pending().await
         }
     }
 
@@ -269,14 +320,16 @@ mod tests {
         assert_eq!(snapshots[1].id, "fallback-0");
         assert_eq!(snapshots[1].name, "fallback-dead");
         assert_eq!(snapshots[1].group, "fallback");
-        assert_eq!(snapshots[1].samples, 1);
+        // An active error is a soft fail: it stays out of the dashboard history
+        // (only budget timeouts count as dashboard failures).
+        assert_eq!(snapshots[1].samples, 0);
         assert_eq!(snapshots[1].successes, 0);
-        assert_eq!(snapshots[1].failure_rate, 1.0);
+        assert_eq!(snapshots[1].failure_rate, 0.0);
         assert_eq!(snapshots[1].avg_latency_ms, None);
     }
 
     #[tokio::test]
-    async fn metrics_record_failed_attempt_deterministically() {
+    async fn active_errors_stay_out_of_dashboard_metrics() {
         let mut metrics = UpstreamMetricsBuilder::default();
         let group = UpstreamGroup::new(
             vec![(
@@ -293,11 +346,48 @@ mod tests {
 
         assert!(group.resolve(&sample_query()).await.is_err());
 
+        // The soft fail lowers the selection weight but is not a dashboard
+        // failure: only exhausting the budget (a timeout) is.
         let snapshots = metrics.snapshot();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].name, "dead");
+        assert_eq!(snapshots[0].samples, 0);
+        assert_eq!(snapshots[0].successes, 0);
+        assert_eq!(snapshots[0].failure_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_in_flight_attempt_counts_as_upstream_timeout_failure() {
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let group = UpstreamGroup::new(
+            vec![(
+                "black-hole".into(),
+                Arc::new(BlackHole) as Arc<dyn Resolver>,
+            )],
+            8,
+            5.0,
+            0,
+            &mut metrics,
+            "primary",
+        );
+        let metrics = metrics.build();
+
+        // An upper layer (fallback budget / hedged deadline) gives up and drops
+        // the still-pending attempt; the black-hole upstream must still be
+        // charged a failure rather than looking healthy.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            group.resolve(&sample_query()),
+        )
+        .await;
+        assert!(outcome.is_err(), "black-hole attempt never returns on its own");
+
+        let snapshots = metrics.snapshot();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].name, "black-hole");
         assert_eq!(snapshots[0].samples, 1);
         assert_eq!(snapshots[0].successes, 0);
+        assert_eq!(snapshots[0].failure_rate, 1.0);
     }
 
     #[tokio::test]
@@ -421,7 +511,7 @@ mod tests {
             &mut metrics,
             "fallback",
         ));
-        let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_secs(5));
+        let chain = FallbackResolver::new(primary, fallback);
         let resp = chain
             .resolve(&sample_query())
             .await
@@ -441,6 +531,8 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_takes_over_when_primary_hangs() {
+        use crate::upstream::hedged::HedgedResolver;
+
         let ok = Arc::new(CountingOk(AtomicUsize::new(0)));
         let mut metrics = UpstreamMetricsBuilder::default();
         let primary = Arc::new(UpstreamGroup::new(
@@ -459,8 +551,15 @@ mod tests {
             &mut metrics,
             "fallback",
         ));
-        // Primary upstream black hole: must switch to fallback once upstream_timeout(200ms) elapses, rather than waiting indefinitely
-        let chain = FallbackResolver::new(primary, fallback, std::time::Duration::from_millis(200));
+        let metrics = metrics.build();
+        // Primary upstream black hole: the retry engine gives up once its 200ms
+        // budget elapses, and only then does the query switch to the fallback.
+        let engine = Arc::new(HedgedResolver::new(
+            primary,
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(200),
+        ));
+        let chain = FallbackResolver::new(engine, fallback);
         let start = std::time::Instant::now();
         let resp = chain
             .resolve(&sample_query())
@@ -473,5 +572,67 @@ mod tests {
                 && elapsed < std::time::Duration::from_secs(2),
             "should cut over right after the 200ms primary budget, took {elapsed:?}"
         );
+
+        // Exhausting the budget is the one failure kind shown on the dashboard:
+        // every hedged attempt still in flight at the deadline charges the
+        // black-hole member with a timeout.
+        let snapshots = metrics.snapshot();
+        let hang = snapshots.iter().find(|s| s.name == "hang").expect("hang member");
+        assert!(hang.samples >= 1, "timeout must reach the dashboard history");
+        assert_eq!(hang.successes, 0);
+        assert_eq!(hang.failure_rate, 1.0);
+    }
+
+    /// First call hangs, second call answers instantly: the classic case where a
+    /// hedged sibling wins while the first attempt is still in flight.
+    struct HangThenOk(AtomicUsize);
+    #[async_trait]
+    impl Resolver for HangThenOk {
+        async fn resolve(&self, query: &Message) -> Result<Message> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                return Err(anyhow!("unreachable"));
+            }
+            let mut resp = Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+            resp.metadata.response_code = ResponseCode::NoError;
+            Ok(resp)
+        }
+    }
+
+    #[tokio::test]
+    async fn hedge_loser_cancelled_after_sibling_win_is_not_a_failure() {
+        use crate::upstream::hedged::HedgedResolver;
+
+        let mut metrics = UpstreamMetricsBuilder::default();
+        let group = Arc::new(UpstreamGroup::new(
+            vec![(
+                "slow-then-fast".into(),
+                Arc::new(HangThenOk(AtomicUsize::new(0))) as Arc<dyn Resolver>,
+            )],
+            8,
+            5.0,
+            0,
+            &mut metrics,
+            "primary",
+        ));
+        let metrics = metrics.build();
+        let engine = HedgedResolver::new(
+            group,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_secs(5),
+        );
+
+        engine
+            .resolve(&sample_query())
+            .await
+            .expect("hedged sibling wins");
+
+        // The first attempt was cancelled because its sibling won — the query
+        // succeeded, so the member must not be charged a timeout for it.
+        let snapshots = metrics.snapshot();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].samples, 1, "only the winning attempt is recorded");
+        assert_eq!(snapshots[0].successes, 1);
+        assert_eq!(snapshots[0].failure_rate, 0.0);
     }
 }
