@@ -101,13 +101,6 @@ test("query outcome maps reject to superseded, render to success, and preserves 
   assert.equal(dashboard.mapQueryResult("failure", "render"), "failure");
 });
 
-test("upstream status distinguishes no samples, unavailable, degraded, and healthy", () => {
-  assert.deepEqual(dashboard.upstreamStatus({ samples: 0, successes: 0, failure_rate: 0 }), { text: "No data", kind: "neutral" });
-  assert.deepEqual(dashboard.upstreamStatus({ samples: 3, successes: 0, failure_rate: 1 }), { text: "Unavailable", kind: "bad" });
-  assert.deepEqual(dashboard.upstreamStatus({ samples: 4, successes: 3, failure_rate: 0.25 }), { text: "Has failures", kind: "warn" });
-  assert.deepEqual(dashboard.upstreamStatus({ samples: 4, successes: 4, failure_rate: 0 }), { text: "Healthy", kind: "good" });
-});
-
 test("average response time formats milliseconds and degrades to placeholder", () => {
   assert.equal(dashboard.averageResponseText({ samples: 3, avg_ms: 16.333 }), "16.3 ms");
   assert.equal(dashboard.averageResponseText({ samples: 10, avg_ms: 234.6 }), "235 ms");

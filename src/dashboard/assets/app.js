@@ -80,16 +80,6 @@
     return `${avg >= 100 ? Math.round(avg) : avg.toFixed(1)} ms`;
   }
 
-  function upstreamStatus(upstream) {
-    const samples = normalizeCount(upstream.samples);
-    const successes = normalizeCount(upstream.successes);
-    const failureRate = Math.max(0, Number(upstream.failure_rate) || 0);
-    if (samples === 0) return { text: "No data", kind: "neutral" };
-    if (successes === 0) return { text: "Unavailable", kind: "bad" };
-    if (failureRate > 0 || successes < samples) return { text: "Has failures", kind: "warn" };
-    return { text: "Healthy", kind: "good" };
-  }
-
   function start() {
     if (start.started) return;
     start.started = true;
@@ -214,8 +204,7 @@
         const heading = element("div", undefined, "upstream-heading");
         const names = element("div");
         names.append(element("strong", upstream.name), element("span", upstream.group, "muted"));
-        const status = upstreamStatus(upstream);
-        heading.append(names, element("span", status.text, `badge badge-${status.kind}`));
+        heading.append(names);
         const metrics = element("dl", undefined, "metrics");
         const latency = Number(upstream.avg_latency_ms);
         [["Avg latency", Number.isFinite(latency) ? `${latency.toFixed(1)} ms` : "--"], ["Samples", upstream.samples], ["Failure rate", `${((Number(upstream.failure_rate) || 0) * 100).toFixed(1)}%`]].forEach(([label, value]) => {
@@ -342,5 +331,5 @@
     updatePagination(); refreshAll();
   }
 
-  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, upstreamStatus, averageResponseText };
+  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, averageResponseText };
 }));
