@@ -184,6 +184,68 @@
     context.fill();
   }
 
+  /* Strokes a smooth line through every point using a monotone cubic Hermite spline
+     (Fritsch-Carlson tangents) emitted as cubic Beziers. Unlike a Catmull-Rom spline,
+     this is shape-preserving: the curve never overshoots the range of its neighboring
+     points, so it can never dip below the baseline (or above the top) between samples.
+     Falls back to a straight segment for two points. The stroke style must already be
+     configured on the context; this only builds and strokes the path. */
+  function strokeSmoothLine(context, points) {
+    const n = points.length;
+    if (n < 2) return;
+    context.beginPath();
+    context.moveTo(points[0].x, points[0].y);
+    if (n === 2) {
+      context.lineTo(points[1].x, points[1].y);
+      context.stroke();
+      return;
+    }
+
+    // Per-segment widths and secant slopes.
+    const dx = new Array(n - 1);
+    const delta = new Array(n - 1);
+    for (let i = 0; i < n - 1; i += 1) {
+      dx[i] = points[i + 1].x - points[i].x;
+      delta[i] = dx[i] !== 0 ? (points[i + 1].y - points[i].y) / dx[i] : 0;
+    }
+
+    // Initial tangents: endpoints use the adjacent secant, interiors the average,
+    // flattened to zero at local extrema so the curve stays monotone.
+    const m = new Array(n);
+    m[0] = delta[0];
+    m[n - 1] = delta[n - 2];
+    for (let i = 1; i < n - 1; i += 1) {
+      m[i] = delta[i - 1] * delta[i] <= 0 ? 0 : (delta[i - 1] + delta[i]) / 2;
+    }
+
+    // Fritsch-Carlson limiter: rein in tangents so no segment overshoots its endpoints.
+    for (let i = 0; i < n - 1; i += 1) {
+      if (delta[i] === 0) {
+        m[i] = 0;
+        m[i + 1] = 0;
+      } else {
+        const a = m[i] / delta[i];
+        const b = m[i + 1] / delta[i];
+        const s = a * a + b * b;
+        if (s > 9) {
+          const t = 3 / Math.sqrt(s);
+          m[i] = t * a * delta[i];
+          m[i + 1] = t * b * delta[i];
+        }
+      }
+    }
+
+    // Convert each Hermite segment to a cubic Bezier (control points at 1/3 spacing).
+    for (let i = 0; i < n - 1; i += 1) {
+      const cp1x = points[i].x + dx[i] / 3;
+      const cp1y = points[i].y + m[i] * dx[i] / 3;
+      const cp2x = points[i + 1].x - dx[i] / 3;
+      const cp2y = points[i + 1].y - m[i + 1] * dx[i] / 3;
+      context.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, points[i + 1].x, points[i + 1].y);
+    }
+    context.stroke();
+  }
+
   function drawTrend(canvas, state, hover) {
     const colors = readColors();
     const { context, width, height } = setupCanvas(canvas, 160);
@@ -229,15 +291,10 @@
       context.strokeStyle = seriesColor(key, colors);
       context.lineWidth = 2;
       context.lineJoin = "round";
+      context.lineCap = "round";
       context.setLineDash(dash);
-      context.beginPath();
-      buckets.forEach((bucket, index) => {
-        const x = xAt(index);
-        const y = yAt(bucket[key]);
-        if (index === 0) context.moveTo(x, y);
-        else context.lineTo(x, y);
-      });
-      context.stroke();
+      const points = buckets.map((bucket, index) => ({ x: xAt(index), y: yAt(bucket[key]) }));
+      strokeSmoothLine(context, points);
     });
     context.setLineDash([]);
 
