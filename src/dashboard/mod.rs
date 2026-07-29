@@ -70,7 +70,6 @@ pub async fn build_runtime(config: &Config) -> Result<Runtime> {
             retention_days: u64::from(config.dashboard.retention_days),
             database_reads: Arc::new(tokio::sync::Semaphore::new(http::DATABASE_READ_CONCURRENCY)),
             cache_sampler: built.cache_sampler,
-            cache_max_entries: config.cache.max_entries,
         },
         dns_socket,
         pipeline: built.pipeline,

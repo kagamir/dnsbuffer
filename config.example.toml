@@ -15,7 +15,7 @@ database_path = "data/dnsbuffer.db" # Relative paths are resolved against the pr
 retention_days = 7              # Allowed 0-9999; 0 keeps forever; 1-15 days trend by hour, 16+ days by day, 0 shows the last 30 daily buckets
 
 [cache]
-max_entries = 10000
+max_memory_mb = 16           # Approximate memory budget for the LRU cache in MB (minimum 1)
 
 [ecs]
 # fixed_subnet = "203.0.113.0/24"   # If set, inject this subnet as ECS; if unset, ECS is not used

@@ -51,7 +51,7 @@ pub async fn build_pipeline(config: &Config, recorder: Recorder) -> Result<Built
     }
 
     let hosts = crate::hosts::HostsMap::from_entries(&config.hosts);
-    let cache = Arc::new(crate::cache::Cache::new(config.cache.max_entries));
+    let cache = Arc::new(crate::cache::Cache::new(config.cache.max_memory_mb));
     let ecs = crate::ecs::subnet_from_config(&config.ecs);
     let mut metrics = UpstreamMetricsBuilder::default();
     // Budget-scoped retry engine around each group: active errors are retried within

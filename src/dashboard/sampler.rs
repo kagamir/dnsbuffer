@@ -45,6 +45,11 @@ impl CacheHitSampler {
         self.cache.len()
     }
 
+    /// (approximate bytes currently held by the cache, configured budget in bytes).
+    pub fn memory_stats(&self) -> (u64, u64) {
+        self.cache.memory_stats()
+    }
+
     /// Record an observation point; skip if neither the cache entry count nor the cumulative lookup count has changed.
     pub fn observe(&self) {
         let (lookups, hits) = self.cache.hit_stats();

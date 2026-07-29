@@ -195,7 +195,8 @@
   .stat-desc {
     @apply mt-2 text-xs text-muted-foreground;
   }
-  #avg-response-value.has-error {
+  #avg-response-value.has-error,
+  #stat-cache-memory.has-error {
     color: var(--destructive);
   }
 
@@ -424,8 +425,19 @@
     @apply mb-1 block w-fit rounded bg-muted px-1.5 py-0.5 font-mono text-[11px];
     color: var(--chart-neutral);
   }
+  /* Inner wrapper inside the Result td: the td keeps its table-cell display so
+     vertical-align centers this div; the div lays the badges out. */
   .result-cell {
-    @apply flex flex-wrap gap-1.5;
+    @apply flex flex-wrap items-center gap-1.5;
+  }
+
+  /* "more" control on the third line of a long Response IP list */
+  .ip-more {
+    @apply block w-fit cursor-pointer rounded border-0 bg-transparent p-0 text-[11px] font-medium;
+    color: var(--chart-neutral);
+  }
+  .ip-more:hover {
+    text-decoration: underline;
   }
 
   /* Domain rankings: cap the list so its height is max(10 rows, the Upstream

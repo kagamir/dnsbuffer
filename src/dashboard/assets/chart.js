@@ -65,6 +65,15 @@
     return String(Math.round(number));
   }
 
+  function formatBytes(value) {
+    const number = normalizeValue(value);
+    const mib = 1024 * 1024;
+    if (number >= mib * 1024) return `${(number / (mib * 1024)).toFixed(1)} GB`;
+    if (number >= mib) return `${(number / mib).toFixed(1)} MB`;
+    if (number >= 1024) return `${(number / 1024).toFixed(1)} KB`;
+    return `${Math.round(number)} B`;
+  }
+
   function formatBucketLabel(timestamp, granularity, locale) {
     const date = new Date(timestamp);
     if (Number.isNaN(date.getTime())) return "--";
@@ -382,6 +391,7 @@
     renderCacheBars,
     normalizeValue,
     formatCount,
+    formatBytes,
     formatBucketLabel,
     hoverIndex,
     tooltipRows,

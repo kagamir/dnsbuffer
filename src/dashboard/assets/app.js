@@ -73,6 +73,21 @@
     return action === "render" ? "success" : "superseded";
   }
 
+  /* Response IP cell model: at most 3 visible lines. Up to 3 IPs fit as-is; with
+     4 or more, the third line becomes a "more" control expanding the full list. */
+  function responseIpDisplay(ips, expanded) {
+    const list = Array.isArray(ips) ? ips : [];
+    if (expanded || list.length <= 3) return { shown: list, moreCount: 0 };
+    return { shown: list.slice(0, 2), moreCount: list.length - 2 };
+  }
+
+  function cacheMemoryText(data, formatBytes) {
+    const used = Number(data && data.memory_bytes);
+    const max = Number(data && data.max_memory_bytes);
+    if (!Number.isFinite(used) || used < 0 || !Number.isFinite(max) || max <= 0) return "Memory: --";
+    return `Memory: ${formatBytes(used)} / ${formatBytes(max)}`;
+  }
+
   function averageResponseText(data) {
     const samples = normalizeCount(data && data.samples);
     const avg = Number(data && data.avg_ms);
@@ -88,7 +103,7 @@
       queryLoading: false, totalPages: null, requestedPage: 1, trendData: null,
       queryRequestId: 0
     };
-    const regionNames = ["trend", "upstreams", "rankings", "queries", "response"];
+    const regionNames = ["trend", "upstreams", "rankings", "queries", "response", "cache"];
     const roundTracker = createRoundTracker(regionNames);
     const regions = Object.fromEntries(regionNames.map((name) => [name, document.querySelector(`#${name}`)]));
     const firstButton = document.querySelector("#first-page");
@@ -222,6 +237,12 @@
     function reportResponseError(message) {
       document.querySelector("#avg-response-value").classList.toggle("has-error", Boolean(message));
     }
+    function renderCacheMemory(data) {
+      document.querySelector("#stat-cache-memory").textContent = cacheMemoryText(data, window.DnsTrendChart.formatBytes);
+    }
+    function reportCacheMemoryError(message) {
+      document.querySelector("#stat-cache-memory").classList.toggle("has-error", Boolean(message));
+    }
     function emptyRow(columns, message) {
       const row = element("tr"); const cell = element("td", message, "empty"); cell.colSpan = columns; row.append(cell); return row;
     }
@@ -242,11 +263,25 @@
         const row = element("tr"); const date = new Date(record.timestamp); const domain = element("td");
         domain.append(element("strong", record.domain), element("span", record.query_type, "muted block"));
         const ips = element("td"); const responseIps = Array.isArray(record.response_ips) ? record.response_ips : [];
-        if (!responseIps.length) ips.append(element("span", "--", "muted")); else responseIps.forEach((ip) => ips.append(element("code", ip)));
+        const renderIpCell = (expanded) => {
+          if (!responseIps.length) return replaceChildren(ips, [element("span", "--", "muted")]);
+          const model = responseIpDisplay(responseIps, expanded);
+          const nodes = model.shown.map((ip) => element("code", ip));
+          if (model.moreCount > 0) {
+            const more = element("button", `+${model.moreCount} more`, "ip-more");
+            more.type = "button";
+            more.addEventListener("click", () => renderIpCell(true), { once: true });
+            nodes.push(more);
+          }
+          replaceChildren(ips, nodes);
+        };
+        renderIpCell(false);
         const upstream = element("td");
         if (record.upstream) upstream.append(element("code", record.upstream)); else upstream.append(element("span", "--", "muted"));
-        const result = element("td", undefined, "result-cell"); addBadge(result, record.response_code || "UNKNOWN", "badge-neutral");
-        if (record.blocked) addBadge(result, "Blocked", "badge-blocked"); if (record.cache_hit) addBadge(result, "Cache", "badge-cache");
+        // Badges live in an inner flex div so the td's vertical-align can center them in tall rows.
+        const result = element("td"); const resultBadges = element("div", undefined, "result-cell"); result.append(resultBadges);
+        addBadge(resultBadges, record.response_code || "UNKNOWN", "badge-neutral");
+        if (record.blocked) addBadge(resultBadges, "Blocked", "badge-blocked"); if (record.cache_hit) addBadge(resultBadges, "Cache", "badge-cache");
         row.append(element("td", Number.isNaN(date.getTime()) ? "--" : date.toLocaleString()), domain, ips, upstream, element("td", `${record.duration_ms} ms`), result); return row;
       }));
       document.querySelector("#page-status").textContent = `Page ${state.page} of ${state.totalPages}`;
@@ -277,6 +312,7 @@
         ["trend", loadRegion("trend", "/api/dashboard/trend", renderTrend)],
         ["upstreams", loadRegion("upstreams", "/api/dashboard/upstreams", renderUpstreams)],
         ["response", loadRegion("response", "/api/dashboard/response-time", renderResponseTime, reportResponseError)],
+        ["cache", loadRegion("cache", "/api/dashboard/cache-curve", renderCacheMemory, reportCacheMemoryError)],
         ["rankings", loadRegion("rankings", "/api/dashboard/rankings", renderRankings)],
         ["queries", loadQueries(false, roundId)]
       ];
@@ -331,5 +367,5 @@
     updatePagination(); refreshAll();
   }
 
-  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, averageResponseText };
+  return { start, queryResponseDecision, applyQueryResponse, paginationControls, mayFinishQuery, searchDecision, createRoundTracker, classifyRegionResult, mapQueryResult, averageResponseText, responseIpDisplay, cacheMemoryText };
 }));

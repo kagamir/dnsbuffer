@@ -36,7 +36,6 @@ pub struct HttpState {
     pub retention_days: u64,
     pub database_reads: Arc<tokio::sync::Semaphore>,
     pub cache_sampler: Arc<CacheHitSampler>,
-    pub cache_max_entries: usize,
 }
 
 pub fn router(state: HttpState) -> Router {
@@ -188,8 +187,10 @@ async fn response_time(
 }
 
 async fn cache_curve(State(state): State<HttpState>) -> Json<CacheCurveDto> {
+    let (memory_bytes, max_memory_bytes) = state.cache_sampler.memory_stats();
     Json(CacheCurveDto {
-        max_entries: state.cache_max_entries as u64,
+        memory_bytes,
+        max_memory_bytes,
         current_entries: state.cache_sampler.cache_len() as u64,
         current: state.cache_sampler.latest(),
         points: state.cache_sampler.points(),
@@ -386,7 +387,10 @@ impl TryFrom<QueryRecord> for QueryRecordDto {
 
 #[derive(Serialize)]
 struct CacheCurveDto {
-    max_entries: u64,
+    /// Approximate bytes currently held by the cache.
+    memory_bytes: u64,
+    /// Configured cache memory budget in bytes.
+    max_memory_bytes: u64,
     current_entries: u64,
     /// The most recent observation point; null when there are no observations yet.
     current: Option<super::sampler::CacheSample>,

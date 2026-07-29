@@ -109,6 +109,38 @@ test("average response time formats milliseconds and degrades to placeholder", (
   assert.equal(dashboard.averageResponseText(undefined), "--");
 });
 
+test("response ip cell shows at most 3 lines and folds 4+ into a more control", () => {
+  const three = ["1.1.1.1", "2.2.2.2", "3.3.3.3"];
+  assert.deepEqual(dashboard.responseIpDisplay(three, false), { shown: three, moreCount: 0 });
+
+  const five = ["1.1.1.1", "2.2.2.2", "3.3.3.3", "4.4.4.4", "5.5.5.5"];
+  assert.deepEqual(dashboard.responseIpDisplay(five, false), {
+    shown: ["1.1.1.1", "2.2.2.2"],
+    moreCount: 3
+  }, "collapsed: 2 IPs plus the more control fill the 3 allowed lines");
+  assert.deepEqual(dashboard.responseIpDisplay(five, true), { shown: five, moreCount: 0 });
+  assert.deepEqual(dashboard.responseIpDisplay(undefined, false), { shown: [], moreCount: 0 });
+});
+
+test("cache memory line renders used / budget and degrades to placeholder", () => {
+  assert.equal(
+    dashboard.cacheMemoryText({ memory_bytes: 3 * 1024 * 1024, max_memory_bytes: 16 * 1024 * 1024 }, chart.formatBytes),
+    "Memory: 3.0 MB / 16.0 MB"
+  );
+  assert.equal(dashboard.cacheMemoryText({ memory_bytes: 0, max_memory_bytes: 1024 * 1024 }, chart.formatBytes), "Memory: 0 B / 1.0 MB");
+  assert.equal(dashboard.cacheMemoryText({ memory_bytes: 10, max_memory_bytes: 0 }, chart.formatBytes), "Memory: --");
+  assert.equal(dashboard.cacheMemoryText(undefined, chart.formatBytes), "Memory: --");
+});
+
+test("byte values use binary-unit labels", () => {
+  assert.equal(chart.formatBytes(0), "0 B");
+  assert.equal(chart.formatBytes(512), "512 B");
+  assert.equal(chart.formatBytes(1536), "1.5 KB");
+  assert.equal(chart.formatBytes(16 * 1024 * 1024), "16.0 MB");
+  assert.equal(chart.formatBytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+  assert.equal(chart.formatBytes("broken"), "0 B");
+});
+
 test("chart counts use safe finite number normalization", () => {
   assert.equal(chart.normalizeValue(Infinity), 0);
   assert.equal(chart.normalizeValue("not-a-number"), 0);

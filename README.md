@@ -11,7 +11,7 @@ A local DNS proxy written in Rust. It listens on UDP port 53 and forwards querie
 - **Bootstrap DNS**: supports IP / DoH / DoT forms; non-IP forms must explicitly note the domain's corresponding IP
 - **Hedged retries**: if the primary upstream attempt does not return within `hedged_retry_ms` (default 1000ms), a new attempt is launched in parallel without cancelling the in-flight one (re-weighted selection, very likely switching upstreams); whichever returns first wins, until the `upstream_timeout_ms` budget is exhausted
 - **Fallback DNS**: automatically takes over after the entire primary upstream group fails or times out (IP / DoH / DoT)
-- **Optimistic cache**: pure in-memory LRU (hashlink chained hash table) — a hit returns immediately (even if expired), an expired hit triggers a background async refresh, and the least-recently-used entry is evicted when the limit is exceeded; only NoError responses are cached; friendly to low-memory machines — when the OS refuses a memory allocation it is treated as a full cache and evicts by LRU to make room instead of crashing
+- **Optimistic cache**: pure in-memory LRU (hashlink chained hash table) — a hit returns immediately (even if expired), an expired hit triggers a background async refresh, and the least-recently-used entries are evicted when the configured memory budget (`max_memory_mb`) is exceeded; only NoError responses are cached; friendly to low-memory machines — when the OS refuses a memory allocation it is treated as a full cache and evicts by LRU to make room instead of crashing
 - **Custom hosts**: exact match + `*.` wildcard, answered directly and locally
 - **Ad blocking**: a subset of adblock syntax (`||domain^`, `@@||domain^` exceptions) + hosts syntax + plain domain lists; local files and remote URLs can be mixed, and remote sources support periodic hot updates (lock-free swap via ArcSwap); a hit returns `0.0.0.0` / `::`; the allowlist takes priority
 - **EDNS Client Subnet (ECS)**: setting `fixed_subnet` injects that subnet, otherwise ECS is not used; the client's own ECS is always stripped to protect privacy
@@ -100,7 +100,7 @@ database_path = "data/dnsbuffer.db" # A relative path is based on the process wo
 retention_days = 7            # Allows 0-9999; 0 means keep forever
 
 [cache]
-max_entries = 10000          # Maximum number of LRU cache entries
+max_memory_mb = 16           # Approximate memory budget for the LRU cache in MB (minimum 1)
 
 [ecs]
 # fixed_subnet = "203.0.113.0/24"   # If set, inject this subnet as ECS; if unset, ECS is not used

@@ -521,7 +521,6 @@ fn test_router_with_sampler(
         retention_days: 7,
         database_reads: Arc::new(tokio::sync::Semaphore::new(4)),
         cache_sampler,
-        cache_max_entries: 10_000,
     })
 }
 
@@ -774,7 +773,16 @@ async fn cache_curve_endpoint_reports_observed_size_and_hit_rate_points() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = json(response).await;
-    assert_eq!(body["max_entries"], 10_000);
+    assert_eq!(
+        body["max_memory_bytes"].as_u64(),
+        Some(10_000 * 1024 * 1024),
+        "budget is configured in MB and reported in bytes"
+    );
+    let memory_bytes = body["memory_bytes"].as_u64().unwrap();
+    assert!(
+        memory_bytes > 0 && memory_bytes < 1024 * 1024,
+        "two small cached entries account for a small non-zero footprint, got {memory_bytes}"
+    );
     assert_eq!(body["current_entries"], 2);
     assert_eq!(body["current"]["size"], 2);
     let expected = 2.0 / 3.0;
@@ -808,7 +816,6 @@ async fn locked_database_returns_timeout_within_client_deadline_and_recovers() {
         cache_sampler: Arc::new(CacheHitSampler::new(Arc::new(
             dnsbuffer::cache::Cache::new(1),
         ))),
-        cache_max_entries: 10_000,
     });
     let started = std::time::Instant::now();
 
