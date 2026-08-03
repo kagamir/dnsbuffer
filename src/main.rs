@@ -13,8 +13,32 @@ struct Args {
     config: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// A DNS proxy is I/O-bound: queries spend their lifetime awaiting upstream UDP
+// or TLS responses, so allocating one worker thread per CPU core only inflates
+// RSS (every worker carries its own 2 MB stack plus a task queue) without
+// improving throughput. We default to 2 worker threads — plenty for a typical
+// home/embedded workload — and let the operator override via the
+// DNSBUFFER_WORKER_THREADS environment variable when more parallelism is needed.
+// Worker stacks are also shrunk from the 2 MB default to 512 KB, which is
+// ample headroom over the deepest await chain in the pipeline.
+const DEFAULT_WORKER_THREADS: usize = 2;
+const WORKER_STACK_SIZE: usize = 512 * 1024;
+
+fn build_runtime() -> Result<tokio::runtime::Runtime> {
+    let worker_threads = std::env::var("DNSBUFFER_WORKER_THREADS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_WORKER_THREADS);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")
+}
+
+fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = config::load(&args.config)?;
 
@@ -27,12 +51,15 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    dashboard::build_runtime(&cfg)
-        .await?
-        .run_until(async {
-            tokio::signal::ctrl_c()
-                .await
-                .context("failed to listen for shutdown signal")
-        })
-        .await
+    let runtime = build_runtime()?;
+    runtime.block_on(async move {
+        dashboard::build_runtime(&cfg)
+            .await?
+            .run_until(async {
+                tokio::signal::ctrl_c()
+                    .await
+                    .context("failed to listen for shutdown signal")
+            })
+            .await
+    })
 }

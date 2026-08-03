@@ -39,3 +39,24 @@ webpki-roots = "1.0.9"
 [dev-dependencies]
 rcgen = "0.14.8"
 tower = { version = "0.5", features = ["util"] }
+
+# Release profile tuned for low memory + small binaries, suitable for embedded
+# deployment. On an embedded device the binary is the dominant RSS contributor,
+# so we optimize for size: full LTO across crates, single codegen unit for best
+# dead-code elimination, size-oriented instruction selection, stripped symbols,
+# and panic=abort to drop the unwinding tables. Tests are unaffected: they run
+# under the dev/test profiles which still unwind.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Same as release but keeps unwinding for any consumer who wants to catch panics
+# (e.g. long-running supervisors that prefer to log and restart only the failed
+# component). Build with `cargo build --profile release-unwind`.
+[profile.release-unwind]
+inherits = "release"
+panic = "unwind"
+strip = "debuginfo"

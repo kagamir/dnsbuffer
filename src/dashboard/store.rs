@@ -69,6 +69,10 @@ impl StoreWorker {
         let (stopped_tx, stopped) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name("dnsbuffer-store".into())
+            // The worker loop only drains an mpsc channel and runs bounded SQLite
+            // INSERT batches; 256 KB is ample headroom and avoids the 8 MB OS
+            // default stack that dominates RSS on low-memory devices.
+            .stack_size(256 * 1024)
             .spawn(move || {
                 run_store_worker(store, retention_days, receiver, shutdown_rx);
                 let _ = stopped_tx.send(());
