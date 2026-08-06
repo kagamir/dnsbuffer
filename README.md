@@ -2,6 +2,8 @@
 
 A local DNS proxy written in Rust. It listens on UDP port 53 and forwards queries over an encrypted upstream (DoH / DoT), with built-in optimistic caching, ad blocking, custom hosts, EDNS Client Subnet, and fallback DNS.
 
+<img src="docs/assets/screenshot.png" alt="screenshot" style="zoom: 50%;" />
+
 ## Features
 
 - **DoH upstream**: strictly picks the protocol per config — HTTP/2 by default, or HTTP/3 (QUIC) only when `http3 = true`, with no protocol downgrade; connection reuse and multiplexing; keep-alive for long-lived connections (H2 ping / QUIC keep-alive 15s), liveness checks before reuse, automatic reconnect-and-retry on failure, so the first request after a long idle period no longer waits out the full timeout; you can set `ip` to a single server IP (v4 or v6), or leave it blank to resolve via bootstrap, with resolved results ordered by the dialing address-family preference (`prefer_ipv6`, IPv4-first by default)
